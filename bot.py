@@ -74,7 +74,7 @@ def get_local_ip():
 
 LOCAL_IP = get_local_ip()
 SERVER_PORT = int(os.environ.get('PORT', '8080'))
-BASE_URL = os.environ.get('BASE_URL', f'http://{LOCAL_IP}:{SERVER_PORT}')
+BASE_URL = os.environ.get('BASE_URL') or f'http://{LOCAL_IP}:{SERVER_PORT}'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
