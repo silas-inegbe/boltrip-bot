@@ -1,0 +1,20 @@
+# Environment Variables & Secrets
+.env
+
+# Temporary Downloads & Cache
+downloads/
+media_cache.json
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
