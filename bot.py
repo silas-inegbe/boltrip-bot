@@ -56,6 +56,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 COFFEE_URL = os.environ.get('COFFEE_URL', '').strip()
 POLAR_URL = os.environ.get('POLAR_URL', '').strip()
 PAYSTACK_URL = os.environ.get('PAYSTACK_URL', '').strip()
+TON_WALLET = os.environ.get('TON_WALLET', 'UQC0oMFoDoiMx5LTBhUOIhOm7ObRx6Sm1xB53f6LZtorkhrO').strip()
 
 DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), 'downloads')
 CACHE_FILE = os.path.join(os.path.dirname(__file__), 'media_cache.json')
@@ -266,7 +267,7 @@ def get_support_keyboard():
     row2 = []
     if COFFEE_URL:
         row2.append(InlineKeyboardButton("☕ Buy Me a Coffee", url=COFFEE_URL))
-    row2.append(InlineKeyboardButton("⭐ Telegram Stars / Crypto", callback_data="info_crypto"))
+    row2.append(InlineKeyboardButton("🪙 Crypto (USDT / TON)", callback_data="info_crypto"))
     buttons.append(row2)
 
     buttons.append([
@@ -557,7 +558,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "info_crypto":
-        await query.message.reply_text("⭐ <b>Telegram Stars & Crypto:</b>\nSend tips via Telegram Stars or TON/USDT directly to @wallet.", parse_mode="HTML")
+        wallet_addr = TON_WALLET or "UQC0oMFoDoiMx5LTBhUOIhOm7ObRx6Sm1xB53f6LZtorkhrO"
+        ton_text = (
+            "🪙 <b>Crypto Support (USDT / TON)</b>\n\n"
+            "You can send tips directly via Telegram Wallet or any TON wallet:\n\n"
+            "• <b>Network:</b> TON (The Open Network)\n"
+            "• <b>Accepted:</b> USDT (TON) or TON (Toncoin)\n"
+            "• <b>Address:</b> <i>(Tap below to copy)</i>\n"
+            f"<code>{wallet_addr}</code>\n\n"
+            "_Thank you so much for supporting Boltrip! ❤️_"
+        )
+        ton_url = f"ton://transfer/{wallet_addr}?text=BoltripSupport"
+        kb = [
+            [InlineKeyboardButton("🪙 Pay via Telegram / TON Wallet", url=ton_url)],
+            [InlineKeyboardButton("⬅️ Back to Payment Methods", callback_data="show_support")]
+        ]
+        await query.message.reply_text(ton_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
     if ":" not in data:
