@@ -465,11 +465,14 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard = [
         [
+            InlineKeyboardButton("🌟 4K / 2K Ultra", callback_data=f"vid4k:{cache_id}"),
             InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
-            InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
         ],
         [
+            InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
             InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
+        ],
+        [
             get_cancel_button(cache_id),
         ]
     ]
@@ -564,11 +567,14 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
     keyboard = [
         [
+            InlineKeyboardButton("🌟 4K / 2K Ultra", callback_data=f"vid4k:{cache_id}"),
             InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
-            InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
         ],
         [
+            InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
             InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
+        ],
+        [
             get_cancel_button(cache_id, "❌ Cancel"),
         ]
     ]
@@ -629,8 +635,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ACTIVE_TASKS[cache_id] = t
         return
 
-    if action in ["vid1080", "vid720", "aud"]:
+    if action in ["vid4k", "vid1080", "vid720", "aud"]:
         quality_map = {
+            "vid4k": "4k",
             "vid1080": "1080",
             "vid720": "720",
             "aud": "audio"
@@ -917,6 +924,8 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
         else:
             if quality == "720":
                 fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+            elif quality == "4k":
+                fmt = "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best"
             else:
                 fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
             
@@ -989,10 +998,10 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
 
     await deliver_file(
         update, context, status_msg, cache_id, downloaded_path,
-        is_audio=is_audio, title=title, author=author, is_tiktok=is_tiktok
+        is_audio=is_audio, title=title, author=author, is_tiktok=is_tiktok, quality=quality
     )
 
-async def deliver_file(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok):
+async def deliver_file(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality="1080"):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
     if file_size_mb >= 49.5:
@@ -1006,9 +1015,9 @@ async def deliver_file(update, context, status_msg, cache_id, file_path, is_audi
         )
         return
 
-    await upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok)
+    await upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality=quality)
 
-async def upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok):
+async def upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality="1080"):
     cancel_markup = get_cancel_keyboard(cache_id)
     main_loop = asyncio.get_running_loop()
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -1105,7 +1114,7 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
 
             if f_id:
                 cached_info = MEDIA_CACHE.get(cache_id, {})
-                cache_key = f"{cached_info.get('url', '')}_{'audio' if is_audio else ('720' if '720' in file_path else '1080')}"
+                cache_key = f"{cached_info.get('url', '')}_{quality}"
                 meta = probe_video_metadata(file_path) if not is_audio else {}
                 FILE_CACHE[cache_key] = {
                     "file_id": f_id,
