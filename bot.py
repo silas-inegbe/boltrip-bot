@@ -970,7 +970,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             
             ydl_opts = {
                 "format": fmt,
-                "format_sort": ["res", "ext:mp4:m4a", "+proto:https", "hasaud"],
+                "format_sort": ["vcodec:h264", "res", "ext:mp4:m4a", "+proto:https", "hasaud"],
                 "outtmpl": outtmpl,
                 "progress_hooks": [progress_hook],
                 "quiet": True,
@@ -980,6 +980,10 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "concurrent_fragment_downloads": 8,
                                 "buffersize": 1024 * 128,
                 "merge_output_format": "mp4",
+                "postprocessor_args": {
+                    "Merger": ["-movflags", "+faststart"],
+                    "FFmpegVideoRemuxer": ["-movflags", "+faststart"],
+                },
                 "extractor_args": {"youtube": {"player_client": ["default", "-android_sdkless"]}, "twitter": {"api": ["syndication"]}},
             }
         if FFMPEG_PATH:
