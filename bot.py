@@ -58,6 +58,20 @@ POLAR_URL = os.environ.get('POLAR_URL', '').strip()
 PAYSTACK_URL = os.environ.get('PAYSTACK_URL', '').strip()
 TON_WALLET = os.environ.get('TON_WALLET', 'UQC0oMFoDoiMx5LTBhUOIhOm7ObRx6Sm1xB53f6LZtorkhrO').strip()
 
+COOKIE_FILE_PATH = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+COOKIES_ENV = os.environ.get('COOKIES_CONTENT', '').strip()
+if COOKIES_ENV:
+    try:
+        with open(COOKIE_FILE_PATH, 'w', encoding='utf-8') as cf:
+            cf.write(COOKIES_ENV)
+        logger.info("🍪 Loaded custom cookies from COOKIES_CONTENT env var!")
+    except Exception as e:
+        logger.warning(f"Could not write COOKIES_CONTENT: {e}")
+
+PROXY_URL = os.environ.get('PROXY_URL') or os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY')
+if PROXY_URL:
+    logger.info(f"🛡️ Routing downloads via proxy: {PROXY_URL[:25]}...")
+
 DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), 'downloads')
 CACHE_FILE = os.path.join(os.path.dirname(__file__), 'media_cache.json')
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -507,7 +521,16 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             except Exception:
                 pass
 
-        opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "extractor_args": {"youtube": {"player_client": ["default", "-android_sdkless"]}, "twitter": {"api": ["syndication"]}},
+        }
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            opts["cookiefile"] = COOKIE_FILE_PATH
+        if PROXY_URL:
+            opts["proxy"] = PROXY_URL
         if FFMPEG_PATH:
             opts["ffmpeg_location"] = FFMPEG_PATH
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -789,6 +812,13 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
                 parse_mode="Markdown"
             )
             await _run_download_workflow(update, context, status_msg, cache_id, quality, url, title, author, is_audio, cancel_markup, main_loop)
+    except Exception as e:
+        logger.error(f"❌ [WORKFLOW ERROR] {e}", exc_info=True)
+        if "Cancelled by user" not in str(e):
+            try:
+                await status_msg.edit_text(f"❌ **Error during download:**\n`{str(e)[:250]}`", parse_mode="Markdown")
+            except Exception:
+                pass
     finally:
         if cache_id in QUEUE_WAITING:
             QUEUE_WAITING.remove(cache_id)
@@ -809,16 +839,23 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             return
         
         if d.get("status") == "downloading":
+            frag_index = d.get("fragment_index")
+            frag_count = d.get("fragment_count")
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             downloaded = d.get("downloaded_bytes") or 0
             speed = d.get("speed") or 0
             eta = d.get("eta") or 0
             
-            percent = (downloaded / total * 100) if total > 0 else 0
+            if frag_index is not None and frag_count is not None and frag_count > 0:
+                percent = (frag_index / frag_count) * 100
+                size_str = f"Chunk {frag_index}/{frag_count}"
+            else:
+                percent = (downloaded / total * 100) if total > 0 else 0
+                size_str = f"{downloaded / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB" if total > 0 else f"{downloaded / (1024*1024):.1f}MB"
+            
             bar = format_progress_bar(percent)
             speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed else "..."
             eta_str = f"{eta}s" if eta else "..."
-            size_str = f"{downloaded / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB" if total > 0 else f"{downloaded / (1024*1024):.1f}MB"
 
             text = (
                 f"📥 **Downloading Media...**\n"
@@ -870,7 +907,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "retries": 10,
                 "concurrent_fragment_downloads": 8,
                                 "buffersize": 1024 * 128,
-                "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+                "extractor_args": {"youtube": {"player_client": ["default", "-android_sdkless"]}, "twitter": {"api": ["syndication"]}},
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -895,10 +932,14 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "concurrent_fragment_downloads": 8,
                                 "buffersize": 1024 * 128,
                 "merge_output_format": "mp4",
-                "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+                "extractor_args": {"youtube": {"player_client": ["default", "-android_sdkless"]}, "twitter": {"api": ["syndication"]}},
             }
         if FFMPEG_PATH:
             ydl_opts["ffmpeg_location"] = FFMPEG_PATH
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            ydl_opts["cookiefile"] = COOKIE_FILE_PATH
+        if PROXY_URL:
+            ydl_opts["proxy"] = PROXY_URL
 
         loop = asyncio.get_running_loop()
         try:
