@@ -269,6 +269,66 @@ async def cancel_task_and_cleanup(cache_id, message=None):
 def get_support_button():
     return InlineKeyboardButton("💖 Help Keep Boltrip Free", callback_data="show_support")
 
+def get_platform_info(url: str) -> str:
+    u = url.lower()
+    if 'tiktok.com' in u or 'douyin.com' in u:
+        return 'tiktok'
+    elif 'twitter.com' in u or 'x.com' in u:
+        return 'twitter'
+    elif 'instagram.com' in u:
+        return 'instagram'
+    elif 'youtube.com' in u or 'youtu.be' in u:
+        return 'youtube'
+    elif 'facebook.com' in u or 'fb.watch' in u:
+        return 'facebook'
+    elif 'reddit.com' in u or 'redd.it' in u:
+        return 'reddit'
+    return 'general'
+
+def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
+    if platform == 'tiktok':
+        buttons = [
+            [InlineKeyboardButton("🎬 Download HD (No Watermark)", callback_data=f"vidbest:{cache_id}")],
+            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
+            [get_cancel_button(cache_id, "❌ Cancel")]
+        ]
+    elif platform == 'twitter':
+        buttons = [
+            [InlineKeyboardButton("🎬 Download Video (Original)", callback_data=f"vidbest:{cache_id}")],
+            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
+            [get_cancel_button(cache_id, "❌ Cancel")]
+        ]
+    elif platform == 'instagram':
+        buttons = [
+            [InlineKeyboardButton("🎬 Download Reel / Post (HD)", callback_data=f"vidbest:{cache_id}")],
+            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
+            [get_cancel_button(cache_id, "❌ Cancel")]
+        ]
+    elif platform == 'youtube':
+        buttons = [
+            [
+                InlineKeyboardButton("🌟 4K / 2K Ultra", callback_data=f"vid4k:{cache_id}"),
+                InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
+            ],
+            [
+                InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
+                InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
+            ],
+            [get_cancel_button(cache_id, "❌ Cancel")]
+        ]
+    else:
+        buttons = [
+            [
+                InlineKeyboardButton("🎬 Best Quality", callback_data=f"vidbest:{cache_id}"),
+                InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
+            ],
+            [
+                InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
+                get_cancel_button(cache_id, "❌ Cancel"),
+            ]
+        ]
+    return InlineKeyboardMarkup(buttons)
+
 def get_cancel_button(cache_id, label="❌ Cancel"):
     return InlineKeyboardButton(label, callback_data=f"cancel:{cache_id}")
 
@@ -463,20 +523,8 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     MEDIA_CACHE[cache_id] = {"url": url, "title": "Shared Media", "author": "Boltrip"}
     save_cache(MEDIA_CACHE)
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🌟 4K / 2K Ultra", callback_data=f"vid4k:{cache_id}"),
-            InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
-        ],
-        [
-            InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
-            InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
-        ],
-        [
-            get_cancel_button(cache_id),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    platform = get_platform_info(url)
+    reply_markup = get_quality_keyboard(cache_id, platform)
     clean_url_display = url[:60] + "..." if len(url) > 60 else url
 
     results = [
@@ -565,20 +613,8 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         ACTIVE_TASKS[cache_id] = t
         return
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🌟 4K / 2K Ultra", callback_data=f"vid4k:{cache_id}"),
-            InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
-        ],
-        [
-            InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
-            InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
-        ],
-        [
-            get_cancel_button(cache_id, "❌ Cancel"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    platform = get_platform_info(url)
+    reply_markup = get_quality_keyboard(cache_id, platform)
 
     await status_msg.edit_text(
         f"🎬 **{title}**\n👤 _{author}_\n\nSelect desired download quality:",
@@ -635,8 +671,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ACTIVE_TASKS[cache_id] = t
         return
 
-    if action in ["vid4k", "vid1080", "vid720", "aud"]:
+    if action in ["vidbest", "vid4k", "vid1080", "vid720", "aud"]:
         quality_map = {
+            "vidbest": "best",
             "vid4k": "4k",
             "vid1080": "1080",
             "vid720": "720",
@@ -926,8 +963,10 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
             elif quality == "4k":
                 fmt = "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best"
-            else:
+            elif quality == "1080":
                 fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+            else:
+                fmt = "bestvideo+bestaudio/best"
             
             ydl_opts = {
                 "format": fmt,
