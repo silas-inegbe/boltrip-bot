@@ -978,8 +978,13 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
         await status_msg.edit_text("❌ Download could not locate completed file.", parse_mode="Markdown")
         return
 
-    cached["file_path"] = downloaded_path
-    cached["is_tiktok"] = is_tiktok
+    cached_item = MEDIA_CACHE.get(cache_id, {})
+    cached_item["file_path"] = downloaded_path
+    cached_item["is_tiktok"] = is_tiktok
+    cached_item["url"] = url
+    cached_item["title"] = title
+    cached_item["author"] = author
+    MEDIA_CACHE[cache_id] = cached_item
     save_cache(MEDIA_CACHE)
 
     await deliver_file(
@@ -1099,7 +1104,8 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
                 f_id = sent_msg.video.file_id
 
             if f_id:
-                cache_key = f"{cached.get('url', '')}_{'audio' if is_audio else ('720' if '720' in file_path else '1080')}"
+                cached_info = MEDIA_CACHE.get(cache_id, {})
+                cache_key = f"{cached_info.get('url', '')}_{'audio' if is_audio else ('720' if '720' in file_path else '1080')}"
                 meta = probe_video_metadata(file_path) if not is_audio else {}
                 FILE_CACHE[cache_key] = {
                     "file_id": f_id,
