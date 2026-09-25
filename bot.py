@@ -151,6 +151,34 @@ def save_cache(cache):
 
 MEDIA_CACHE = load_cache()
 
+FILE_CACHE_FILE = os.path.join(os.path.dirname(__file__), 'file_cache.json')
+
+def load_file_cache():
+    if os.path.exists(FILE_CACHE_FILE):
+        try:
+            with open(FILE_CACHE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_file_cache(cache):
+    try:
+        if len(cache) > 500:
+            keys = list(cache.keys())[-500:]
+            cache = {k: cache[k] for k in keys}
+        with open(FILE_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+FILE_CACHE = load_file_cache()
+
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get('MAX_CONCURRENT_DOWNLOADS', '5'))
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+COMPRESS_SEMAPHORE = asyncio.Semaphore(2)
+QUEUE_WAITING = []
+
 def extract_url(text: str):
     if not text:
         return None
@@ -200,6 +228,9 @@ def cleanup_files(cache_id):
             pass
 
 async def cancel_task_and_cleanup(cache_id, message=None):
+    global QUEUE_WAITING
+    if cache_id in QUEUE_WAITING:
+        QUEUE_WAITING.remove(cache_id)
     task = ACTIVE_TASKS.pop(cache_id, None)
     if task and not task.done():
         task.cancel()
@@ -661,11 +692,101 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
     cancel_markup = get_cancel_keyboard(cache_id)
     main_loop = asyncio.get_running_loop()
 
-    await status_msg.edit_text(
-        f"⏳ **Starting download...**\n`{title[:45]}`\n\nQuality: `{quality}`",
-        reply_markup=cancel_markup,
-        parse_mode="Markdown"
-    )
+    # --- 1. INSTANT TELEGRAM FILE_ID CACHE CHECK ---
+    cache_key = f"{url}_{quality}"
+    cached_file = FILE_CACHE.get(cache_key)
+    if cached_file and cached_file.get("file_id"):
+        logger.info(f"⚡ Instant delivery from Telegram cache for {url}")
+        file_id = cached_file["file_id"]
+        c_title = cached_file.get("title", title)
+        c_author = cached_file.get("author", author)
+        c_size = cached_file.get("size_mb", 0.0)
+        c_type = cached_file.get("type", "video")
+
+        import html
+        t_clean = html.escape(c_title[:100])
+        a_clean = html.escape(c_author[:60])
+        caption = (
+            f"🎬 <b>{t_clean}</b>\n"
+            f"👤 <i>{a_clean}</i>\n"
+            f"📦 <code>{c_size:.1f} MB</code>\n\n"
+            f"⚡ Instant delivery via @Boltrip_bot"
+        )
+        chat_id = update.effective_chat.id
+        delivery_markup = get_post_download_keyboard()
+
+        try:
+            if c_type == "audio":
+                sent_msg = await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=file_id,
+                    title=c_title[:64],
+                    performer=c_author[:64],
+                    caption=caption,
+                    reply_markup=delivery_markup,
+                    parse_mode="HTML"
+                )
+            else:
+                kwargs = {
+                    "chat_id": chat_id,
+                    "video": file_id,
+                    "caption": caption,
+                    "reply_markup": delivery_markup,
+                    "parse_mode": "HTML",
+                    "supports_streaming": True
+                }
+                w = cached_file.get("width")
+                h = cached_file.get("height")
+                dur = cached_file.get("duration", 0)
+                if w and h:
+                    kwargs["width"] = w
+                    kwargs["height"] = h
+                if dur > 0:
+                    kwargs["duration"] = dur
+                await context.bot.send_video(**kwargs)
+
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            ACTIVE_TASKS.pop(cache_id, None)
+            return
+        except Exception as e:
+            logger.warning(f"Cached file_id delivery failed ({e}), proceeding to fresh download...")
+
+    # --- 2. CONCURRENCY QUEUE SEMAPHORE ---
+    in_queue = False
+    if DOWNLOAD_SEMAPHORE.locked():
+        in_queue = True
+        if cache_id not in QUEUE_WAITING:
+            QUEUE_WAITING.append(cache_id)
+        pos = QUEUE_WAITING.index(cache_id) + 1
+        await status_msg.edit_text(
+            f"⏳ **In Queue (Position #{pos})**\n`{title[:45]}`\n\n"
+            f"_High server traffic: {MAX_CONCURRENT_DOWNLOADS} downloads currently active._\n"
+            f"Your download will start automatically once a slot opens.",
+            reply_markup=cancel_markup,
+            parse_mode="Markdown"
+        )
+
+    try:
+        async with DOWNLOAD_SEMAPHORE:
+            if in_queue and cache_id in QUEUE_WAITING:
+                QUEUE_WAITING.remove(cache_id)
+
+            await status_msg.edit_text(
+                f"⏳ **Starting download...**\n`{title[:45]}`\n\nQuality: `{quality}`",
+                reply_markup=cancel_markup,
+                parse_mode="Markdown"
+            )
+            await _run_download_workflow(update, context, status_msg, cache_id, quality, url, title, author, is_audio, cancel_markup, main_loop)
+    finally:
+        if cache_id in QUEUE_WAITING:
+            QUEUE_WAITING.remove(cache_id)
+        ACTIVE_TASKS.pop(cache_id, None)
+    return
+
+async def _run_download_workflow(update, context, status_msg, cache_id, quality, url, title, author, is_audio, cancel_markup, main_loop):
 
     last_edit = [0]
     last_text = [""]
@@ -874,7 +995,7 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
         chat_id = update.effective_chat.id
 
         if is_audio:
-            await context.bot.send_audio(
+            sent_msg = await context.bot.send_audio(
                 chat_id=chat_id,
                 audio=reader,
                 title=title[:64],
@@ -907,7 +1028,39 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
             if dur > 0:
                 kwargs["duration"] = dur
 
-            await context.bot.send_video(**kwargs)
+            sent_msg = await context.bot.send_video(**kwargs)
+
+        # Save to permanent Telegram file_id cache
+        try:
+            f_id = None
+            if is_audio and 'sent_msg' in locals() and sent_msg.audio:
+                f_id = sent_msg.audio.file_id
+            elif 'sent_msg' in locals() and sent_msg.video:
+                f_id = sent_msg.video.file_id
+
+            if f_id:
+                cache_key = f"{cached.get('url', '')}_{'audio' if is_audio else ('720' if '720' in file_path else '1080')}"
+                meta = probe_video_metadata(file_path) if not is_audio else {}
+                FILE_CACHE[cache_key] = {
+                    "file_id": f_id,
+                    "type": "audio" if is_audio else "video",
+                    "title": title,
+                    "author": author,
+                    "width": meta.get("width"),
+                    "height": meta.get("height"),
+                    "duration": meta.get("duration", 0),
+                    "size_mb": file_size_mb
+                }
+                save_file_cache(FILE_CACHE)
+        except Exception as ce:
+            logger.debug(f"Cache save error: {ce}")
+
+        # Immediate disk cleanup to maintain 0 MB disk footprint
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
 
         try:
             await status_msg.delete()
