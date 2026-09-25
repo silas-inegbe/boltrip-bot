@@ -244,35 +244,23 @@ def get_large_file_keyboard(cache_id, is_audio=False):
 
 SUPPORT_POPUP_TEXT = (
     "❤️ <b>Help Us Keep Boltrip 100% Free & Ad-Free!</b>\n\n"
-    "Unlike other downloaders, <b>Boltrip has ZERO ads, no subscription traps, and no data caps</b>.\n\n"
-    "⚡ Every single 1080p video stream, audio extraction, and large file delivery runs on dedicated high-speed cloud servers that cost real money to maintain every month.\n\n"
-    "If Boltrip saved your time, preserved your mobile data, or helped you in groups, <b>even a small donation directly funds server bandwidth</b> so we can keep this service 100% free and fast for everyone worldwide!\n\n"
-    "<b>Choose your preferred way to support:</b>"
+    "Unlike other downloaders, <b>Boltrip has ZERO ads, no subscriptions, and no limits</b>.\n\n"
+    "⚡ Every 1080p stream, audio extraction, and large file delivery runs on dedicated high-speed cloud servers that cost real money to maintain every month.\n\n"
+    "If Boltrip saved your time, preserved your data, or helped you in groups, <b>even a small donation directly funds server bandwidth</b> so we can keep it 100% free and fast for everyone worldwide!\n\n"
+    "🪙 <b>Crypto Support (USDT / TON):</b>\n"
+    "• <b>Network:</b> TON (The Open Network)\n"
+    "• <b>Accepted Assets:</b> USDT (TON) or TON (Toncoin)\n"
+    "• <b>Wallet Address:</b> <i>(Tap address below to copy)</i>\n"
+    f"<code>{TON_WALLET}</code>\n\n"
+    "<i>Thank you so much for keeping free tools alive! ❤️</i>"
 )
 
 def get_support_keyboard():
-    buttons = []
-    row1 = []
-    if POLAR_URL:
-        row1.append(InlineKeyboardButton("🌍 Global (Polar / Apple Pay)", url=POLAR_URL))
-    else:
-        row1.append(InlineKeyboardButton("🌍 Global (Polar)", callback_data="info_polar"))
-
-    if PAYSTACK_URL:
-        row1.append(InlineKeyboardButton("🌍 Africa (Paystack)", url=PAYSTACK_URL))
-    else:
-        row1.append(InlineKeyboardButton("🌍 Africa (Paystack)", callback_data="info_paystack"))
-    buttons.append(row1)
-
-    row2 = []
-    if COFFEE_URL:
-        row2.append(InlineKeyboardButton("☕ Buy Me a Coffee", url=COFFEE_URL))
-    row2.append(InlineKeyboardButton("🪙 Crypto (USDT / TON)", callback_data="info_crypto"))
-    buttons.append(row2)
-
-    buttons.append([
-        InlineKeyboardButton("📢 Share Boltrip with Friends", switch_inline_query="Check out @Boltrip_bot for fast, ad-free video downloads! ⚡")
-    ])
+    ton_url = f"ton://transfer/{TON_WALLET}?text=BoltripSupport"
+    buttons = [
+        [InlineKeyboardButton("🪙 Pay via Telegram / TON Wallet", url=ton_url)],
+        [InlineKeyboardButton("📢 Share Boltrip with Friends", switch_inline_query="Check out @Boltrip_bot for fast, ad-free video downloads! ⚡")]
+    ]
     return InlineKeyboardMarkup(buttons)
 
 def download_tiktok_direct(url, cache_id, progress_hook=None):
@@ -547,33 +535,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "show_support":
         await query.message.reply_text(SUPPORT_POPUP_TEXT, reply_markup=get_support_keyboard(), parse_mode="HTML")
-        return
-
-    if data == "info_polar":
-        await query.message.reply_text("🌍 <b>Global Payment Link:</b>\nComing very soon! We are configuring Polar for instant Apple Pay and card payments.", parse_mode="HTML")
-        return
-
-    if data == "info_paystack":
-        await query.message.reply_text("🌍 <b>Africa Payment Link:</b>\nComing very soon! We are configuring Paystack for local cards and bank transfer payments.", parse_mode="HTML")
-        return
-
-    if data == "info_crypto":
-        wallet_addr = TON_WALLET or "UQC0oMFoDoiMx5LTBhUOIhOm7ObRx6Sm1xB53f6LZtorkhrO"
-        ton_text = (
-            "🪙 <b>Crypto Support (USDT / TON)</b>\n\n"
-            "You can send tips directly via Telegram Wallet or any TON wallet:\n\n"
-            "• <b>Network:</b> TON (The Open Network)\n"
-            "• <b>Accepted:</b> USDT (TON) or TON (Toncoin)\n"
-            "• <b>Address:</b> <i>(Tap below to copy)</i>\n"
-            f"<code>{wallet_addr}</code>\n\n"
-            "_Thank you so much for supporting Boltrip! ❤️_"
-        )
-        ton_url = f"ton://transfer/{wallet_addr}?text=BoltripSupport"
-        kb = [
-            [InlineKeyboardButton("🪙 Pay via Telegram / TON Wallet", url=ton_url)],
-            [InlineKeyboardButton("⬅️ Back to Payment Methods", callback_data="show_support")]
-        ]
-        await query.message.reply_text(ton_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
     if ":" not in data:
