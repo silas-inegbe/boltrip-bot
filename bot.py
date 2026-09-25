@@ -78,7 +78,8 @@ SERVER_PORT = int(os.environ.get('PORT', '8080'))
 BASE_URL = os.environ.get('BASE_URL') or f'http://{LOCAL_IP}:{SERVER_PORT}'
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -243,6 +244,7 @@ async def cancel_task_and_cleanup(cache_id, message=None):
             pass
 
     cleanup_files(cache_id)
+    logger.info(f"❌ [CANCELLED] Operation {cache_id} cancelled by user. Cleaned up files.")
 
     if message:
         try:
@@ -340,6 +342,8 @@ async def handle_direct_download(request):
 
     file_path = matching[0]
     filename = os.path.basename(file_path)
+    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    logger.info(f"🌐 [PHONE DOWNLOAD] Client downloaded '{filename}' ({size_mb:.1f} MB)")
     return web.FileResponse(file_path, headers={
         "Content-Disposition": f'attachment; filename="{filename}"'
     })
@@ -477,6 +481,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, force_audio=False, force_video=False):
     global MEDIA_CACHE
+    user = update.effective_user
+    user_str = f"@{user.username}" if user and user.username else f"User {user.id if user else 'Unknown'}"
+    logger.info(f"📥 [REQUEST] {user_str} sent link: {url}")
     cache_id = str(abs(hash(url)) % 10000000)
     cancel_markup = InlineKeyboardMarkup([[get_cancel_button(cache_id, "❌ Cancel")]])
     status_msg = await update.message.reply_text("⚡ **Analyzing link...**", reply_markup=cancel_markup, parse_mode="Markdown")
@@ -519,6 +526,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
     title = meta.get("title", "Media")
     author = meta.get("author", "Creator")
+    logger.info(f"🔍 [METADATA] Extracted: '{title[:45]}' | Creator: '{author}'")
     MEDIA_CACHE[cache_id] = {"url": url, "title": title, "author": author}
     save_cache(MEDIA_CACHE)
 
@@ -670,6 +678,7 @@ async def execute_compression_and_upload(update, context, status_msg, cache_id, 
         return
 
     comp_size_mb = os.path.getsize(compressed_path) / (1024 * 1024)
+    logger.info(f"🗜️ [COMPRESS COMPLETE] Compressed {input_path} down to {comp_size_mb:.1f} MB")
     if comp_size_mb > 49.5:
         await status_msg.edit_text(
             f"⚠️ Compressed file is {comp_size_mb:.1f} MB (still exceeds Telegram's 50 MB limit).\nPlease use the direct phone download:",
@@ -818,6 +827,12 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 f"⚡ `{speed_str}` | ⏱️ `{eta_str}`\n"
                 f"📦 `{size_str}`"
             )
+            # Log milestones on server console at ~25%, 50%, 75%, 100%
+            pct_int = int(percent)
+            if pct_int in [25, 50, 75, 100] and pct_int != getattr(progress_hook, 'last_log_pct', -1):
+                progress_hook.last_log_pct = pct_int
+                logger.info(f"📥 [DOWNLOADING] '{title[:30]}' -> {percent:.1f}% ({speed_str}, ETA {eta_str})")
+
             if text != last_text[0]:
                 last_text[0] = text
                 last_edit[0] = now
@@ -951,6 +966,7 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
     cancel_markup = get_cancel_keyboard(cache_id)
     main_loop = asyncio.get_running_loop()
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    logger.info(f"📤 [UPLOAD START] Sending '{title[:35]}' ({file_size_mb:.1f} MB) as {'Audio' if is_audio else 'Video'} to chat {update.effective_chat.id}")
     last_edit = [0]
     last_pct = [-1]
 
@@ -963,6 +979,9 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
             return
         last_edit[0] = now
         last_pct[0] = int(percent)
+        if int(percent) in [25, 50, 75, 100] and int(percent) != getattr(upload_progress, 'last_log_pct', -1):
+            upload_progress.last_log_pct = int(percent)
+            logger.info(f"📤 [UPLOADING] '{title[:30]}' -> {percent:.1f}% ({speed_mb:.1f} MB/s)")
         bar = format_progress_bar(percent)
         text = (
             f"📤 **Uploading to Telegram...**\n"
@@ -1055,10 +1074,12 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
         except Exception as ce:
             logger.debug(f"Cache save error: {ce}")
 
+        logger.info(f"🎉 [DELIVERED] Successfully sent '{title[:35]}' ({file_size_mb:.1f} MB) to chat {chat_id}")
         # Immediate disk cleanup to maintain 0 MB disk footprint
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
+                logger.info(f"🧹 [CLEANUP] Deleted temporary file from disk: {os.path.basename(file_path)}")
         except Exception:
             pass
 
