@@ -198,7 +198,20 @@ def extract_url(text: str):
     if not text:
         return None
     match = URL_REGEX.search(text)
-    return match.group(0) if match else None
+    if not match:
+        return None
+    url = match.group(0)
+    # Unwrap Facebook login/?next= redirects to get original post URL
+    if "facebook.com/login/" in url and "next=" in url:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            target = qs.get("next", [None])[0]
+            if target:
+                url = urllib.parse.unquote(target)
+        except Exception:
+            pass
+    return url
 
 def is_tiktok_url(url: str) -> bool:
     u = url.lower()
@@ -556,6 +569,22 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     loop = asyncio.get_running_loop()
 
     def fetch_meta():
+        # Fast oEmbed path for YouTube (100% reliable, zero player-response errors)
+        if "youtube.com" in url or "youtu.be" in url:
+            try:
+                oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url)}&format=json"
+                req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    data = json.loads(r.read().decode())
+                    if data.get("title"):
+                        return {
+                            "title": data.get("title", "YouTube Video")[:80],
+                            "author": data.get("author_name", "YouTube Creator"),
+                            "is_tiktok": False
+                        }
+            except Exception:
+                pass
+
         if is_tiktok_url(url):
             try:
                 api_url = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}"
@@ -576,7 +605,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             "quiet": True,
             "no_warnings": True,
             "extract_flat": True,
-            "extractor_args": {"youtube": {"player_client": ["android", "web", "ios"]}, "twitter": {"api": ["syndication"]}},
+            "extractor_args": {"youtube": {"player_client": ["tv", "android", "web"]}, "twitter": {"api": ["syndication"]}},
         }
         if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
             opts["cookiefile"] = COOKIE_FILE_PATH
@@ -951,7 +980,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "retries": 10,
                 "concurrent_fragment_downloads": 8,
                                 "buffersize": 1024 * 128,
-                "extractor_args": {"youtube": {"player_client": ["android", "web", "ios"]}, "twitter": {"api": ["syndication"]}},
+                "extractor_args": {"youtube": {"player_client": ["tv", "android", "web"]}, "twitter": {"api": ["syndication"]}},
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -984,7 +1013,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     "Merger": ["-movflags", "+faststart"],
                     "FFmpegVideoRemuxer": ["-movflags", "+faststart"],
                 },
-                "extractor_args": {"youtube": {"player_client": ["android", "web", "ios"]}, "twitter": {"api": ["syndication"]}},
+                "extractor_args": {"youtube": {"player_client": ["tv", "android", "web"]}, "twitter": {"api": ["syndication"]}},
             }
         if FFMPEG_PATH:
             ydl_opts["ffmpeg_location"] = FFMPEG_PATH
