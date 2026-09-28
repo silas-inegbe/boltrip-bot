@@ -634,6 +634,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             "quiet": True,
             "no_warnings": True,
             "extract_flat": True,
+            "js_runtimes": "deno",
             "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
         }
         if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
@@ -1009,7 +1010,8 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "retries": 10,
                 "concurrent_fragment_downloads": 8,
                                 "buffersize": 1024 * 128,
-                "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
+                "js_runtimes": "deno",
+            "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -1042,7 +1044,8 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     "Merger": ["-movflags", "+faststart"],
                     "FFmpegVideoRemuxer": ["-movflags", "+faststart"],
                 },
-                "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
+            "js_runtimes": "deno",
+            "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
             }
         if FFMPEG_PATH:
             ydl_opts["ffmpeg_location"] = FFMPEG_PATH
