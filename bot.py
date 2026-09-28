@@ -213,6 +213,41 @@ def extract_url(text: str):
             pass
     return url
 
+def resolve_url(url: str) -> str:
+    """Follow HTTP redirects to get the real destination URL.
+    Handles Facebook share links (fb.com/share/v/...) which redirect
+    through multiple hops and may land on login pages internally."""
+    try:
+        import urllib.request
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        req = urllib.request.Request(url, headers=headers, method="HEAD")
+        # Allow up to 10 redirects
+        opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+        with opener.open(req, timeout=8) as resp:
+            final = resp.geturl()
+            if final and final != url:
+                url = final
+    except Exception:
+        pass
+    # Final unwrap: if we ended up on a Facebook login page, decode the next= param
+    if "facebook.com/login/" in url and "next=" in url:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            target = qs.get("next", [None])[0]
+            if target:
+                url = urllib.parse.unquote(target)
+        except Exception:
+            pass
+    return url
+
 def is_tiktok_url(url: str) -> bool:
     u = url.lower()
     return 'tiktok.com' in u or 'douyin.com' in u
@@ -561,6 +596,8 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     global MEDIA_CACHE
     user = update.effective_user
     user_str = f"@{user.username}" if user and user.username else f"User {user.id if user else 'Unknown'}"
+    # Follow redirects early so Facebook share/v/ links resolve to real post URLs
+    url = resolve_url(url)
     logger.info(f"📥 [REQUEST] {user_str} sent link: {url}")
     cache_id = str(abs(hash(url)) % 10000000)
     cancel_markup = InlineKeyboardMarkup([[get_cancel_button(cache_id, "❌ Cancel")]])
@@ -605,7 +642,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             "quiet": True,
             "no_warnings": True,
             "extract_flat": True,
-            "extractor_args": {"twitter": {"api": ["syndication"]}},
+            "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["tv_embedded"]}},
         }
         if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
             opts["cookiefile"] = COOKIE_FILE_PATH
@@ -980,7 +1017,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "retries": 10,
                 "concurrent_fragment_downloads": 8,
                                 "buffersize": 1024 * 128,
-                "extractor_args": {"twitter": {"api": ["syndication"]}},
+                "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["tv_embedded"]}},
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -1013,7 +1050,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     "Merger": ["-movflags", "+faststart"],
                     "FFmpegVideoRemuxer": ["-movflags", "+faststart"],
                 },
-                "extractor_args": {"twitter": {"api": ["syndication"]}},
+                "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["tv_embedded"]}},
             }
         if FFMPEG_PATH:
             ydl_opts["ffmpeg_location"] = FFMPEG_PATH
