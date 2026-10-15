@@ -983,7 +983,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             "js_runtimes": {"deno": {}, "node": {}},
             "extractor_args": {
                 "twitter": {"api": ["syndication"]},
-                "youtube": {"player_client": ["web_embedded", "android", "mweb", "default"]},
+                "youtube": {"player_client": ["tv", "web_embedded", "web", "default"]},
             },
         }
         if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
@@ -1003,7 +1003,16 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     try:
         meta = await loop.run_in_executor(None, fetch_meta)
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Failed to load link:**\n`{str(e)[:200]}`", parse_mode="Markdown")
+        err_text = str(e)
+        if "unable to extract video" in err_text.lower() and "linkedin" in err_text.lower():
+            friendly_err = (
+                "⚠️ **No video found on this LinkedIn post.**\n\n"
+                "• This post does not contain a playable video (it might be a text, image, or document post).\n"
+                "• Or the post might be restricted to 1st-degree connections, private, or deleted."
+            )
+            await status_msg.edit_text(friendly_err, parse_mode="Markdown")
+        else:
+            await status_msg.edit_text(f"❌ **Failed to load link:**\n`{err_text[:200]}`", parse_mode="Markdown")
         return
 
     title = meta.get("title", "Media")
@@ -1422,7 +1431,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "js_runtimes": {"deno": {}, "node": {}},
                 "extractor_args": {
                     "twitter": {"api": ["syndication"]},
-                    "youtube": {"player_client": ["web_embedded", "android", "mweb", "default"]}
+                    "youtube": {"player_client": ["tv", "web_embedded", "web", "default"]}
                 },
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
@@ -1442,7 +1451,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             
             ydl_opts = {
                 "format": fmt,
-                "format_sort": ["vcodec:h264", "res", "ext:mp4:m4a", "+proto:https", "hasaud"],
+                "format_sort": ["vcodec:h264", "res", "ext:mp4:m4a", "hasaud"],
                 "outtmpl": outtmpl,
                 "progress_hooks": [progress_hook],
                 "quiet": True,
@@ -1459,7 +1468,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "js_runtimes": {"deno": {}, "node": {}},
                 "extractor_args": {
                     "twitter": {"api": ["syndication"]},
-                    "youtube": {"player_client": ["web_embedded", "android", "mweb", "default"]}
+                    "youtube": {"player_client": ["tv", "web_embedded", "web", "default"]}
                 },
             }
         if FFMPEG_PATH:
@@ -1472,16 +1481,39 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
         loop = asyncio.get_running_loop()
         try:
             def run_ydl():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    fname = ydl.prepare_filename(info)
-                    if is_audio:
-                        fname = os.path.splitext(fname)[0] + ".mp3"
-                    elif not fname.endswith(".mp4"):
-                        base = os.path.splitext(fname)[0]
-                        if os.path.exists(base + ".mp4"):
-                            fname = base + ".mp4"
-                    return fname, info
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        fname = ydl.prepare_filename(info)
+                        if is_audio:
+                            fname = os.path.splitext(fname)[0] + ".mp3"
+                        elif not fname.endswith(".mp4"):
+                            base = os.path.splitext(fname)[0]
+                            if os.path.exists(base + ".mp4"):
+                                fname = base + ".mp4"
+                        return fname, info
+                except Exception as first_err:
+                    err_str = str(first_err).lower()
+                    if "403" in err_str or "forbidden" in err_str:
+                        logger.warning(f"HTTP 403 on {url}. Retrying with fallback player client...")
+                        fallback_opts = dict(ydl_opts)
+                        fallback_opts["extractor_args"] = {
+                            "twitter": {"api": ["syndication"]},
+                            "youtube": {"player_client": ["tv", "ios", "default"]}
+                        }
+                        if not is_audio:
+                            fallback_opts["format"] = "best[ext=mp4]/bestvideo+bestaudio/best"
+                        with yt_dlp.YoutubeDL(fallback_opts) as ydl2:
+                            info = ydl2.extract_info(url, download=True)
+                            fname = ydl2.prepare_filename(info)
+                            if is_audio:
+                                fname = os.path.splitext(fname)[0] + ".mp3"
+                            elif not fname.endswith(".mp4"):
+                                base = os.path.splitext(fname)[0]
+                                if os.path.exists(base + ".mp4"):
+                                    fname = base + ".mp4"
+                            return fname, info
+                    raise first_err
 
             fname, info = await loop.run_in_executor(None, run_ydl)
             if os.path.exists(fname):
