@@ -601,6 +601,182 @@ def download_facebook_direct(url, cache_id, progress_hook=None, quality="best"):
         logger.warning(f"Facebook direct download error: {e}")
     return None
 
+def get_pinterest_cookies():
+    if not os.path.exists(COOKIE_FILE_PATH):
+        return {}
+    try:
+        import http.cookiejar
+        jar = http.cookiejar.MozillaCookieJar(COOKIE_FILE_PATH)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        return {c.name: c.value for c in jar if "pinterest" in c.domain}
+    except Exception:
+        return {}
+
+def fetch_pinterest_direct(url: str):
+    if not curl_requests:
+        return None
+    try:
+        cookies = get_pinterest_cookies()
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        r = curl_requests.get(url, cookies=cookies, headers=headers, impersonate="chrome", allow_redirects=True, timeout=12)
+        html = r.text
+        real_url = r.url
+
+        title = "Pinterest Media"
+        author = "Pinterest Creator"
+
+        titles = re.findall(r'<title>(.*?)</title>', html)
+        if titles:
+            clean_t = titles[0].replace(" | Pinterest", "").replace(" - Pinterest", "").strip()
+            if clean_t:
+                title = clean_t
+
+        video_url = None
+        image_url = None
+
+        m = re.search(r'<script id="__PWS_INITIAL_PROPS__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m:
+            try:
+                props = json.loads(m.group(1))
+
+                def find_pin(o):
+                    if isinstance(o, dict):
+                        if ("videos" in o and o["videos"]) or ("images" in o and o["images"]):
+                            return o
+                        for v in o.values():
+                            res = find_pin(v)
+                            if res:
+                                return res
+                    elif isinstance(o, list):
+                        for it in o:
+                            res = find_pin(it)
+                            if res:
+                                return res
+                    return None
+
+                pin_dict = find_pin(props)
+                if pin_dict:
+                    if pin_dict.get("title"):
+                        title = pin_dict["title"]
+                    elif pin_dict.get("grid_title"):
+                        title = pin_dict["grid_title"]
+
+                    pinner = pin_dict.get("pinner", {})
+                    if pinner.get("username"):
+                        author = f"@{pinner['username']}"
+                    elif pin_dict.get("closeup_attribution", {}).get("full_name"):
+                        author = pin_dict["closeup_attribution"]["full_name"]
+
+                    videos = pin_dict.get("videos") or {}
+                    video_list = videos.get("video_list") or {}
+
+                    for key in ["V_720P", "V_EXP720P", "V_1080P", "V_EXP1080P"]:
+                        if key in video_list and video_list[key].get("url") and ".mp4" in video_list[key]["url"]:
+                            video_url = video_list[key]["url"]
+                            break
+
+                    if not video_url:
+                        for vinfo in video_list.values():
+                            if isinstance(vinfo, dict) and vinfo.get("url") and ".mp4" in vinfo["url"]:
+                                video_url = vinfo["url"]
+                                break
+
+                    images = pin_dict.get("images") or {}
+                    if isinstance(images, dict):
+                        for img_key in ["orig", "736x", "564x"]:
+                            if img_key in images and images[img_key].get("url"):
+                                image_url = images[img_key]["url"]
+                                break
+            except Exception as e:
+                logger.debug(f"Error parsing Pinterest props: {e}")
+
+        if not video_url:
+            mp4_matches = re.findall(r'https?://v1\.pinimg\.com/videos/[^\s"\'<>]+\.mp4[^\s"\'<>]*', html)
+            if mp4_matches:
+                for m_url in mp4_matches:
+                    if "720w" in m_url or "expmp4" in m_url.lower():
+                        video_url = m_url
+                        break
+                if not video_url:
+                    video_url = mp4_matches[0]
+
+        if not video_url and not image_url:
+            img_matches = re.findall(r'https?://i\.pinimg\.com/originals/[^\s"\'<>]+\.(?:jpg|png|webp)', html)
+            if img_matches:
+                image_url = img_matches[0]
+
+        if video_url:
+            return {
+                "title": title[:80],
+                "author": author[:60],
+                "is_tiktok": False,
+                "is_pinterest": True,
+                "has_video": True,
+                "media_url": video_url,
+                "ext": "mp4",
+                "resolved_url": real_url,
+            }
+        elif image_url:
+            return {
+                "title": title[:80],
+                "author": author[:60],
+                "is_tiktok": False,
+                "is_pinterest": True,
+                "has_video": False,
+                "media_url": image_url,
+                "ext": "jpg",
+                "resolved_url": real_url,
+            }
+    except Exception as e:
+        logger.warning(f"Pinterest direct meta extraction failed: {e}")
+    return None
+
+def download_pinterest_direct(url, cache_id, progress_hook=None, direct_media_url=None, ext="mp4"):
+    media_url = direct_media_url
+    if not media_url:
+        meta = fetch_pinterest_direct(url)
+        if not meta or not meta.get("media_url"):
+            return None
+        media_url = meta["media_url"]
+        ext = meta.get("ext", "mp4")
+
+    out_path = os.path.join(DOWNLOAD_DIR, f"dl_{cache_id}_pin.{ext}")
+    try:
+        req = urllib.request.Request(media_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r, open(out_path, "wb") as f:
+            total = int(r.headers.get("content-length", 0))
+            downloaded = 0
+            chunk_size = 64 * 1024
+            start_time = time.time()
+            while True:
+                chunk = r.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress_hook:
+                    elapsed = max(time.time() - start_time, 0.1)
+                    speed = downloaded / elapsed
+                    progress_hook({
+                        "status": "downloading",
+                        "downloaded_bytes": downloaded,
+                        "total_bytes": total,
+                        "speed": speed,
+                        "eta": int((total - downloaded) / speed) if speed > 0 and total > downloaded else 0
+                    })
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as e:
+        logger.warning(f"Pinterest direct download error: {e}")
+    return None
+
 
 async def handle_direct_download(request):
     file_id = request.match_info.get("file_id")
@@ -795,6 +971,11 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                     "is_facebook": True,
                 }
 
+        if is_pinterest_url(url):
+            pin_meta = fetch_pinterest_direct(url)
+            if pin_meta:
+                return pin_meta
+
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -828,7 +1009,15 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     title = meta.get("title", "Media")
     author = meta.get("author", "Creator")
     logger.info(f"🔍 [METADATA] Extracted: '{title[:45]}' | Creator: '{author}'")
-    MEDIA_CACHE[cache_id] = {"url": url, "title": title, "author": author}
+    MEDIA_CACHE[cache_id] = {
+        "url": url,
+        "title": title,
+        "author": author,
+        "is_pinterest": meta.get("is_pinterest", False),
+        "media_url": meta.get("media_url"),
+        "ext": meta.get("ext", "mp4"),
+        "has_video": meta.get("has_video", True),
+    }
     save_cache(MEDIA_CACHE)
 
     if force_audio:
@@ -1029,6 +1218,14 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
                     reply_markup=delivery_markup,
                     parse_mode="HTML"
                 )
+            elif c_type == "photo":
+                sent_msg = await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=file_id,
+                    caption=caption,
+                    reply_markup=delivery_markup,
+                    parse_mode="HTML"
+                )
             else:
                 kwargs = {
                     "chat_id": chat_id,
@@ -1154,6 +1351,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
 
     is_tiktok = is_tiktok_url(url)
     is_fb = is_facebook_url(url)
+    is_pin = is_pinterest_url(url)
     downloaded_path = None
 
     if is_tiktok and not is_audio:
@@ -1184,6 +1382,28 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     downloaded_path = mp3_path
         except Exception as e:
             logger.warning(f"Facebook direct download failed, falling back to yt-dlp: {e}")
+            downloaded_path = None
+
+    if is_pin and not downloaded_path:
+        try:
+            loop = asyncio.get_running_loop()
+            cached_media_url = MEDIA_CACHE.get(cache_id, {}).get("media_url")
+            cached_ext = MEDIA_CACHE.get(cache_id, {}).get("ext", "mp4")
+            downloaded_path = await loop.run_in_executor(
+                None, lambda: download_pinterest_direct(url, cache_id, progress_hook, direct_media_url=cached_media_url, ext=cached_ext)
+            )
+            if downloaded_path and is_audio and downloaded_path.endswith(".mp4"):
+                mp3_path = os.path.splitext(downloaded_path)[0] + ".mp3"
+                if FFMPEG_PATH:
+                    cmd = [FFMPEG_PATH, "-y", "-i", downloaded_path, "-vn", "-c:a", "libmp3lame", "-q:a", "2", mp3_path]
+                    await loop.run_in_executor(None, lambda: subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True))
+                    try:
+                        os.remove(downloaded_path)
+                    except Exception:
+                        pass
+                    downloaded_path = mp3_path
+        except Exception as e:
+            logger.warning(f"Pinterest direct download failed, falling back to yt-dlp: {e}")
             downloaded_path = None
 
     if not downloaded_path:
@@ -1388,6 +1608,16 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
                 write_timeout=300.0,
                 read_timeout=120.0
             )
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+            sent_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=reader,
+                caption=caption,
+                reply_markup=delivery_markup,
+                parse_mode="HTML",
+                write_timeout=300.0,
+                read_timeout=120.0
+            )
         else:
             meta = probe_video_metadata(file_path)
             w = meta.get("width")
@@ -1415,18 +1645,24 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
         # Save to permanent Telegram file_id cache
         try:
             f_id = None
+            c_type = "video"
             if is_audio and 'sent_msg' in locals() and sent_msg.audio:
                 f_id = sent_msg.audio.file_id
+                c_type = "audio"
+            elif 'sent_msg' in locals() and sent_msg.photo:
+                f_id = sent_msg.photo[-1].file_id
+                c_type = "photo"
             elif 'sent_msg' in locals() and sent_msg.video:
                 f_id = sent_msg.video.file_id
+                c_type = "video"
 
             if f_id:
                 cached_info = MEDIA_CACHE.get(cache_id, {})
                 cache_key = f"{cached_info.get('url', '')}_{quality}"
-                meta = probe_video_metadata(file_path) if not is_audio else {}
+                meta = probe_video_metadata(file_path) if (not is_audio and c_type == "video") else {}
                 FILE_CACHE[cache_key] = {
                     "file_id": f_id,
-                    "type": "audio" if is_audio else "video",
+                    "type": c_type,
                     "title": title,
                     "author": author,
                     "width": meta.get("width"),
