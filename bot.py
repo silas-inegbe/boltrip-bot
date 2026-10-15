@@ -1229,7 +1229,16 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 cleanup_files(cache_id)
                 return
             logger.error(f"yt-dlp download failed: {e}")
-            await status_msg.edit_text(f"❌ **Download failed:**\n`{str(e)[:250]}`", parse_mode="Markdown")
+            err_msg = str(e)
+            if "confirm you" in err_msg.lower() and "bot" in err_msg.lower():
+                user_friendly_err = (
+                    "🔒 **YouTube Bot Verification Required**\n\n"
+                    "YouTube blocked this cloud server IP for this video.\n\n"
+                    "💡 **Fix:** Export your `cookies.txt` with the *'Get cookies.txt LOCALLY'* extension and set the `COOKIES_CONTENT` environment variable in your Render dashboard."
+                )
+                await status_msg.edit_text(user_friendly_err, parse_mode="Markdown")
+            else:
+                await status_msg.edit_text(f"❌ **Download failed:**\n`{err_msg[:250]}`", parse_mode="Markdown")
             return
 
     if not downloaded_path or not os.path.exists(downloaded_path):
