@@ -219,14 +219,19 @@ def extract_url(text: str):
     return url
 
 def resolve_url(url: str) -> str:
-    """Follow HTTP redirects to get the real destination URL.
-    NOTE: Facebook share links are NOT resolved here — yt-dlp's own
-    FacebookShareVideoIE extractor handles them correctly. Resolving them
-    ourselves causes login-page redirects on datacenter IPs."""
-    # Let yt-dlp handle Facebook URLs natively — do not pre-resolve
+    """Follow HTTP redirects to get the real destination URL."""
+    # Let our specialized extractors handle Facebook natively — do not resolve to login pages
     if "facebook.com" in url or "fb.com" in url or "fb.watch" in url:
         return url
+    # Full pin and post links are already direct — skip redirect resolution
+    if "pinterest.com/pin/" in url or "linkedin.com/posts/" in url or "linkedin.com/feed/" in url:
+        return url
     try:
+        # For short-links like pin.it, lnkd.in, use curl_cffi with Chrome TLS impersonation
+        if curl_requests and any(s in url for s in ["pin.it", "lnkd.in"]):
+            r = curl_requests.get(url, impersonate="chrome", allow_redirects=True, timeout=8)
+            if r.url and r.url != url:
+                return r.url
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -252,6 +257,14 @@ def is_tiktok_url(url: str) -> bool:
 def is_facebook_url(url: str) -> bool:
     u = url.lower()
     return 'facebook.com' in u or 'fb.watch' in u or 'fb.com' in u
+
+def is_pinterest_url(url: str) -> bool:
+    u = url.lower()
+    return 'pinterest.com' in u or 'pin.it' in u
+
+def is_linkedin_url(url: str) -> bool:
+    u = url.lower()
+    return 'linkedin.com' in u or 'lnkd.in' in u
 
 def format_progress_bar(percent, length=12):
     percent = max(0.0, min(100.0, percent))
@@ -332,6 +345,10 @@ def get_platform_info(url: str) -> str:
         return 'facebook'
     elif 'reddit.com' in u or 'redd.it' in u:
         return 'reddit'
+    elif 'pinterest.com' in u or 'pin.it' in u:
+        return 'pinterest'
+    elif 'linkedin.com' in u or 'lnkd.in' in u:
+        return 'linkedin'
     return 'general'
 
 def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
@@ -347,9 +364,10 @@ def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
             [get_cancel_button(cache_id, "❌ Cancel")]
         ]
-    elif platform == 'instagram':
+    elif platform in ['instagram', 'pinterest', 'linkedin']:
+        label = "Reel / Post" if platform == 'instagram' else ("Pin" if platform == 'pinterest' else "Post")
         buttons = [
-            [InlineKeyboardButton("🎬 Download Reel / Post (HD)", callback_data=f"vidbest:{cache_id}")],
+            [InlineKeyboardButton(f"🎬 Download {label} (HD)", callback_data=f"vidbest:{cache_id}")],
             [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
             [get_cancel_button(cache_id, "❌ Cancel")]
         ]
