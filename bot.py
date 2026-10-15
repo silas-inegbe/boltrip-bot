@@ -36,6 +36,15 @@ from telegram.ext import (
     filters
 )
 import yt_dlp
+try:
+    import yt_dlp.extractor.linkedin as yt_linkedin
+    yt_linkedin.LinkedInIE._VALID_URL = [
+        r'https?://(?:www\.)?linkedin\.com/posts/[^/?#]+-(?P<id>\d+)(?:-\w+)?/?(?:[?#]|$)',
+        r'https?://(?:www\.)?linkedin\.com/feed/update/urn:li:(?:activity|ugcPost|share):(?P<id>\d+)',
+        r'https?://(?:www\.)?linkedin\.com/video/live/urn:li:(?:activity|ugcPost|share):(?P<id>\d+)',
+    ]
+except Exception:
+    pass
 
 FFMPEG_PATH = None
 try:
@@ -216,6 +225,16 @@ def extract_url(text: str):
                 url = urllib.parse.unquote(target)
         except Exception:
             pass
+    # Unwrap LinkedIn authwall redirects to get original post URL
+    if "linkedin.com/authwall" in url and "sessionRedirect=" in url:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            target = qs.get("sessionRedirect", [None])[0]
+            if target:
+                url = urllib.parse.unquote(target)
+        except Exception:
+            pass
     return url
 
 def resolve_url(url: str) -> str:
@@ -224,14 +243,21 @@ def resolve_url(url: str) -> str:
     if "facebook.com" in url or "fb.com" in url or "fb.watch" in url:
         return url
     # Full pin and post links are already direct — skip redirect resolution
-    if "pinterest.com/pin/" in url or "linkedin.com/posts/" in url or "linkedin.com/feed/" in url:
+    if any(k in url for k in ["pinterest.com/pin/", "linkedin.com/posts/", "linkedin.com/feed/", "linkedin.com/video/"]):
         return url
     try:
         # For short-links like pin.it, lnkd.in, use curl_cffi with Chrome TLS impersonation
         if curl_requests and any(s in url for s in ["pin.it", "lnkd.in"]):
             r = curl_requests.get(url, impersonate="chrome", allow_redirects=True, timeout=8)
             if r.url and r.url != url:
-                return r.url
+                target_url = r.url
+                if "linkedin.com/authwall" in target_url and "sessionRedirect=" in target_url:
+                    parsed = urllib.parse.urlparse(target_url)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    unwrapped = qs.get("sessionRedirect", [None])[0]
+                    if unwrapped:
+                        return urllib.parse.unquote(unwrapped)
+                return target_url
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -245,6 +271,12 @@ def resolve_url(url: str) -> str:
         with opener.open(req, timeout=8) as resp:
             final = resp.geturl()
             if final and final != url:
+                if "linkedin.com/authwall" in final and "sessionRedirect=" in final:
+                    parsed = urllib.parse.urlparse(final)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    unwrapped = qs.get("sessionRedirect", [None])[0]
+                    if unwrapped:
+                        return urllib.parse.unquote(unwrapped)
                 url = final
     except Exception:
         pass
