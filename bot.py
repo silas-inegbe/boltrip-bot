@@ -986,7 +986,8 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                 "youtube": {"player_client": ["tv", "web_embedded", "web", "default"]},
             },
         }
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        is_yt = ("youtube.com" in url or "youtu.be" in url)
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0 and not is_yt:
             opts["cookiefile"] = COOKIE_FILE_PATH
         if PROXY_URL:
             opts["proxy"] = PROXY_URL
@@ -1473,7 +1474,9 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             }
         if FFMPEG_PATH:
             ydl_opts["ffmpeg_location"] = FFMPEG_PATH
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        ydl_opts["source_address"] = "0.0.0.0"
+        is_yt = ("youtube.com" in url or "youtu.be" in url)
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0 and not is_yt:
             ydl_opts["cookiefile"] = COOKIE_FILE_PATH
         if PROXY_URL:
             ydl_opts["proxy"] = PROXY_URL
@@ -1495,14 +1498,16 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 except Exception as first_err:
                     err_str = str(first_err).lower()
                     if "403" in err_str or "forbidden" in err_str:
-                        logger.warning(f"HTTP 403 on {url}. Retrying with fallback player client...")
+                        logger.warning(f"HTTP 403 on {url}. Retrying with clean unauthenticated web_embedded client...")
                         fallback_opts = dict(ydl_opts)
+                        fallback_opts.pop("cookiefile", None)
+                        fallback_opts["source_address"] = "0.0.0.0"
                         fallback_opts["extractor_args"] = {
                             "twitter": {"api": ["syndication"]},
-                            "youtube": {"player_client": ["tv", "ios", "default"]}
+                            "youtube": {"player_client": ["web_embedded", "android", "tv"]}
                         }
                         if not is_audio:
-                            fallback_opts["format"] = "best[ext=mp4]/bestvideo+bestaudio/best"
+                            fallback_opts["format"] = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
                         with yt_dlp.YoutubeDL(fallback_opts) as ydl2:
                             info = ydl2.extract_info(url, download=True)
                             fname = ydl2.prepare_filename(info)
@@ -1513,6 +1518,21 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                                 if os.path.exists(base + ".mp4"):
                                     fname = base + ".mp4"
                             return fname, info
+                    elif ("sign in" in err_str or "confirm your age" in err_str or "bot" in err_str) and is_yt:
+                        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+                            logger.info(f"Sign-in/age gate on {url}. Retrying with cookies...")
+                            fallback_opts = dict(ydl_opts)
+                            fallback_opts["cookiefile"] = COOKIE_FILE_PATH
+                            with yt_dlp.YoutubeDL(fallback_opts) as ydl3:
+                                info = ydl3.extract_info(url, download=True)
+                                fname = ydl3.prepare_filename(info)
+                                if is_audio:
+                                    fname = os.path.splitext(fname)[0] + ".mp3"
+                                elif not fname.endswith(".mp4"):
+                                    base = os.path.splitext(fname)[0]
+                                    if os.path.exists(base + ".mp4"):
+                                        fname = base + ".mp4"
+                                return fname, info
                     raise first_err
 
             fname, info = await loop.run_in_executor(None, run_ydl)
