@@ -11,6 +11,11 @@ import asyncio
 import subprocess
 import urllib.request
 import urllib.parse
+import html
+try:
+    from curl_cffi import requests as curl_requests
+except Exception:
+    curl_requests = None
 from datetime import datetime
 from aiohttp import web
 from telegram import (
@@ -244,6 +249,10 @@ def is_tiktok_url(url: str) -> bool:
     u = url.lower()
     return 'tiktok.com' in u or 'douyin.com' in u
 
+def is_facebook_url(url: str) -> bool:
+    u = url.lower()
+    return 'facebook.com' in u or 'fb.watch' in u or 'fb.com' in u
+
 def format_progress_bar(percent, length=12):
     percent = max(0.0, min(100.0, percent))
     filled = int(length * (percent / 100))
@@ -447,6 +456,102 @@ def download_tiktok_direct(url, cache_id, progress_hook=None):
         logger.warning(f"TikTok direct fetch error: {e}")
     return None
 
+def fetch_facebook_direct(url):
+    if not curl_requests:
+        return None
+    try:
+        r = curl_requests.get(url, impersonate="chrome", allow_redirects=True, timeout=12)
+        if r.status_code != 200:
+            return None
+        html_text = r.text
+
+        title = None
+        og_t = re.search(r'property="og:title"\s+content="([^"]+)"', html_text) or \
+               re.search(r'name="description"\s+content="([^"]+)"', html_text)
+        if og_t:
+            title = html.unescape(og_t.group(1))
+            if " | " in title:
+                title = title.split(" | ", 1)[-1]
+            title = re.sub(r'[\r\n]+', ' ', title).strip()[:80]
+        if not title:
+            title = "Facebook Video"
+
+        author = "Facebook Creator"
+        author_m = re.search(r'ownerName:"([^"]+)"', html_text) or \
+                   re.search(r'"owner":\{"name":"([^"]+)"\}', html_text)
+        if author_m:
+            author = author_m.group(1)
+
+        hd_matches = re.findall(r'"browser_native_hd_url":"(https:[^"]+)"', html_text) or \
+                     re.findall(r'"playable_url_quality_hd":"(https:[^"]+)"', html_text) or \
+                     re.findall(r'hd_src:"(https:[^"]+)"', html_text)
+
+        sd_matches = re.findall(r'"browser_native_sd_url":"(https:[^"]+)"', html_text) or \
+                     re.findall(r'"playable_url":"(https:[^"]+)"', html_text) or \
+                     re.findall(r'sd_src:"(https:[^"]+)"', html_text)
+
+        hd_url = None
+        if hd_matches:
+            hd_raw = hd_matches[0].encode('utf-8').decode('unicode_escape')
+            hd_url = hd_raw.replace(r'\/', '/').replace(r'\u0026', '&')
+
+        sd_url = None
+        if sd_matches:
+            sd_raw = sd_matches[0].encode('utf-8').decode('unicode_escape')
+            sd_url = sd_raw.replace(r'\/', '/').replace(r'\u0026', '&')
+
+        if not hd_url and not sd_url:
+            return None
+
+        return {
+            "title": title,
+            "author": author,
+            "hd_url": hd_url,
+            "sd_url": sd_url,
+        }
+    except Exception as e:
+        logger.warning(f"Facebook direct meta extraction failed: {e}")
+        return None
+
+def download_facebook_direct(url, cache_id, progress_hook=None, quality="best"):
+    if not curl_requests:
+        return None
+    meta = fetch_facebook_direct(url)
+    if not meta:
+        return None
+    stream_url = meta["hd_url"] if (quality != "720" and meta["hd_url"]) else (meta["sd_url"] or meta["hd_url"])
+    if not stream_url:
+        return None
+    try:
+        out_path = os.path.join(DOWNLOAD_DIR, f"dl_{cache_id}_fb.mp4")
+        r = curl_requests.get(stream_url, impersonate="chrome", stream=True, timeout=30)
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        start_time = time.time()
+        chunk_size = 128 * 1024
+        with open(out_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=chunk_size):
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress_hook:
+                    elapsed = max(time.time() - start_time, 0.1)
+                    speed = downloaded / elapsed
+                    progress_hook({
+                        "status": "downloading",
+                        "downloaded_bytes": downloaded,
+                        "total_bytes": total,
+                        "speed": speed,
+                        "eta": int((total - downloaded) / speed) if speed > 0 and total > downloaded else 0
+                    })
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as e:
+        logger.warning(f"Facebook direct download error: {e}")
+    return None
+
+
 async def handle_direct_download(request):
     file_id = request.match_info.get("file_id")
     matching = glob.glob(os.path.join(DOWNLOAD_DIR, f"*{file_id}*"))
@@ -630,12 +735,25 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             except Exception:
                 pass
 
+        if is_facebook_url(url):
+            fb_meta = fetch_facebook_direct(url)
+            if fb_meta:
+                return {
+                    "title": fb_meta.get("title", "Facebook Video")[:80],
+                    "author": fb_meta.get("author", "Facebook Creator"),
+                    "is_tiktok": False,
+                    "is_facebook": True,
+                }
+
         opts = {
             "quiet": True,
             "no_warnings": True,
             "extract_flat": True,
-            "js_runtimes": "deno",
-            "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
+            "js_runtimes": {"deno": {}, "node": {}},
+            "extractor_args": {
+                "twitter": {"api": ["syndication"]},
+                "youtube": {"player_client": ["web_embedded", "android", "mweb", "default"]},
+            },
         }
         if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
             opts["cookiefile"] = COOKIE_FILE_PATH
@@ -985,6 +1103,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     logger.debug(f"Progress edit error: {ex}")
 
     is_tiktok = is_tiktok_url(url)
+    is_fb = is_facebook_url(url)
     downloaded_path = None
 
     if is_tiktok and not is_audio:
@@ -995,6 +1114,26 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             )
         except Exception as e:
             logger.warning(f"TikWM direct download failed, falling back to yt-dlp: {e}")
+            downloaded_path = None
+
+    if is_fb and not downloaded_path:
+        try:
+            loop = asyncio.get_running_loop()
+            downloaded_path = await loop.run_in_executor(
+                None, lambda: download_facebook_direct(url, cache_id, progress_hook, quality=quality)
+            )
+            if downloaded_path and is_audio:
+                mp3_path = os.path.splitext(downloaded_path)[0] + ".mp3"
+                if FFMPEG_PATH:
+                    cmd = [FFMPEG_PATH, "-y", "-i", downloaded_path, "-vn", "-c:a", "libmp3lame", "-q:a", "2", mp3_path]
+                    await loop.run_in_executor(None, lambda: subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True))
+                    try:
+                        os.remove(downloaded_path)
+                    except Exception:
+                        pass
+                    downloaded_path = mp3_path
+        except Exception as e:
+            logger.warning(f"Facebook direct download failed, falling back to yt-dlp: {e}")
             downloaded_path = None
 
     if not downloaded_path:
@@ -1009,9 +1148,12 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "socket_timeout": 60,
                 "retries": 10,
                 "concurrent_fragment_downloads": 8,
-                                "buffersize": 1024 * 128,
-                "js_runtimes": "deno",
-            "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
+                "buffersize": 1024 * 128,
+                "js_runtimes": {"deno": {}, "node": {}},
+                "extractor_args": {
+                    "twitter": {"api": ["syndication"]},
+                    "youtube": {"player_client": ["web_embedded", "android", "mweb", "default"]}
+                },
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -1038,14 +1180,17 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "socket_timeout": 60,
                 "retries": 10,
                 "concurrent_fragment_downloads": 8,
-                                "buffersize": 1024 * 128,
+                "buffersize": 1024 * 128,
                 "merge_output_format": "mp4",
                 "postprocessor_args": {
                     "Merger": ["-movflags", "+faststart"],
                     "FFmpegVideoRemuxer": ["-movflags", "+faststart"],
                 },
-            "js_runtimes": "deno",
-            "extractor_args": {"twitter": {"api": ["syndication"]}, "youtube": {"player_client": ["web"]}},
+                "js_runtimes": {"deno": {}, "node": {}},
+                "extractor_args": {
+                    "twitter": {"api": ["syndication"]},
+                    "youtube": {"player_client": ["web_embedded", "android", "mweb", "default"]}
+                },
             }
         if FFMPEG_PATH:
             ydl_opts["ffmpeg_location"] = FFMPEG_PATH
