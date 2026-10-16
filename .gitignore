@@ -4,6 +4,7 @@
 # Temporary Downloads & Cache
 downloads/
 media_cache.json
+clean_yt_cookies.txt
 *.session
 *.session-journal
 

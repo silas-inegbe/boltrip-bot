@@ -37,6 +37,11 @@ from telegram.ext import (
 )
 import yt_dlp
 try:
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+    CHROME_IMPERSONATE = ImpersonateTarget.from_str('chrome')
+except Exception:
+    CHROME_IMPERSONATE = None
+try:
     import yt_dlp.extractor.linkedin as yt_linkedin
     yt_linkedin.LinkedInIE._VALID_URL = [
         r'https?://(?:www\.)?linkedin\.com/posts/[^/?#]+-(?P<id>\d+)(?:-\w+)?/?(?:[?#]|$)',
@@ -81,6 +86,56 @@ if COOKIES_ENV:
         logger.info("🍪 Loaded custom cookies from COOKIES_CONTENT env var!")
     except Exception as e:
         logger.warning(f"Could not write COOKIES_CONTENT: {e}")
+
+YT_COOKIE_FILE_PATH = os.path.join(os.path.dirname(__file__), 'clean_yt_cookies.txt')
+
+def sanitize_youtube_cookies(src_path, dst_path):
+    """
+    Sanitizes YouTube cookies by filtering out short-lived, volatile session tokens
+    (__Secure-1PSIDTS, __Secure-3PSIDTS, SIDCC, *PSIDCC, YSC) which expire every 1-2 hours
+    and cause HTTP 403 Forbidden errors when stale. Keeps long-lived authentication and session
+    cookies (LOGIN_INFO, HSID, SSID, APISID, SAPISID, SID, __Secure-*PSID, __Secure-*PAPISID,
+    VISITOR_INFO1_LIVE, PREF, SOCS).
+    """
+    if not os.path.exists(src_path) or os.path.getsize(src_path) == 0:
+        return None
+    try:
+        with open(src_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+        
+        volatile_tokens = ('PSIDTS', 'SIDCC', 'YSC')
+        clean_lines = []
+        has_yt = False
+        for line in lines:
+            if not line.strip() or line.startswith('#'):
+                clean_lines.append(line)
+                continue
+            if 'youtube.com' in line or 'google.com' in line:
+                has_yt = True
+                if any(vt in line for vt in volatile_tokens):
+                    continue
+            clean_lines.append(line)
+        
+        if not has_yt:
+            return src_path
+            
+        with open(dst_path, 'w', encoding='utf-8') as f:
+            f.writelines(clean_lines)
+        return dst_path
+    except Exception as e:
+        logger.warning(f"Could not sanitize YouTube cookies: {e}")
+        return src_path
+
+def get_yt_cookie_file():
+    if os.path.exists(YT_COOKIE_FILE_PATH) and os.path.getsize(YT_COOKIE_FILE_PATH) > 0:
+        return YT_COOKIE_FILE_PATH
+    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        return sanitize_youtube_cookies(COOKIE_FILE_PATH, YT_COOKIE_FILE_PATH)
+    return None
+
+# Perform initial sanitization on startup if cookies exist
+if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+    sanitize_youtube_cookies(COOKIE_FILE_PATH, YT_COOKIE_FILE_PATH)
 
 PROXY_URL = os.environ.get('PROXY_URL') or os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY')
 if PROXY_URL:
@@ -983,11 +1038,17 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             "js_runtimes": {"deno": {}, "node": {}},
             "extractor_args": {
                 "twitter": {"api": ["syndication"]},
-                "youtube": {"player_client": ["tv", "web_embedded", "web", "default"]},
+                "youtube": {"player_client": ["ios", "android", "web"]},
             },
         }
+        if CHROME_IMPERSONATE:
+            opts["impersonate"] = CHROME_IMPERSONATE
         is_yt = ("youtube.com" in url or "youtu.be" in url)
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0 and not is_yt:
+        if is_yt:
+            yt_c = get_yt_cookie_file()
+            if yt_c and os.path.exists(yt_c):
+                opts["cookiefile"] = yt_c
+        elif os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
             opts["cookiefile"] = COOKIE_FILE_PATH
         if PROXY_URL:
             opts["proxy"] = PROXY_URL
@@ -1418,6 +1479,9 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
 
     if not downloaded_path:
         outtmpl = os.path.join(DOWNLOAD_DIR, f"dl_{cache_id}_%(id)s.%(ext)s")
+        is_yt = ("youtube.com" in url or "youtu.be" in url)
+        yt_cookies = get_yt_cookie_file() if is_yt else None
+
         if is_audio:
             ydl_opts = {
                 "format": "bestaudio/best",
@@ -1427,12 +1491,12 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "no_warnings": True,
                 "socket_timeout": 60,
                 "retries": 10,
-                "concurrent_fragment_downloads": 8,
+                "concurrent_fragment_downloads": 1 if is_yt else 8,
                 "buffersize": 1024 * 128,
                 "js_runtimes": {"deno": {}, "node": {}},
                 "extractor_args": {
                     "twitter": {"api": ["syndication"]},
-                    "youtube": {"player_client": ["tv", "web_embedded", "web", "default"]}
+                    "youtube": {"player_client": ["ios", "android", "web"]} if is_yt else {}
                 },
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
@@ -1442,13 +1506,13 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             }
         else:
             if quality == "720":
-                fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+                fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best[ext=mp4]/best"
             elif quality == "4k":
-                fmt = "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best"
+                fmt = "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best[ext=mp4]/best"
             elif quality == "1080":
-                fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+                fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best[ext=mp4]/best"
             else:
-                fmt = "bestvideo+bestaudio/best"
+                fmt = "bestvideo+bestaudio/best[ext=mp4]/best"
             
             ydl_opts = {
                 "format": fmt,
@@ -1459,7 +1523,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "no_warnings": True,
                 "socket_timeout": 60,
                 "retries": 10,
-                "concurrent_fragment_downloads": 8,
+                "concurrent_fragment_downloads": 1 if is_yt else 8,
                 "buffersize": 1024 * 128,
                 "merge_output_format": "mp4",
                 "postprocessor_args": {
@@ -1469,15 +1533,21 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "js_runtimes": {"deno": {}, "node": {}},
                 "extractor_args": {
                     "twitter": {"api": ["syndication"]},
-                    "youtube": {"player_client": ["tv", "web_embedded", "web", "default"]}
+                    "youtube": {"player_client": ["ios", "android", "web"]} if is_yt else {}
                 },
             }
         if FFMPEG_PATH:
             ydl_opts["ffmpeg_location"] = FFMPEG_PATH
         ydl_opts["source_address"] = "0.0.0.0"
-        is_yt = ("youtube.com" in url or "youtu.be" in url)
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0 and not is_yt:
+        if CHROME_IMPERSONATE:
+            ydl_opts["impersonate"] = CHROME_IMPERSONATE
+
+        if is_yt:
+            if yt_cookies and os.path.exists(yt_cookies):
+                ydl_opts["cookiefile"] = yt_cookies
+        elif os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
             ydl_opts["cookiefile"] = COOKIE_FILE_PATH
+
         if PROXY_URL:
             ydl_opts["proxy"] = PROXY_URL
 
@@ -1497,35 +1567,22 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                         return fname, info
                 except Exception as first_err:
                     err_str = str(first_err).lower()
-                    if "403" in err_str or "forbidden" in err_str:
-                        logger.warning(f"HTTP 403 on {url}. Retrying with clean unauthenticated web_embedded client...")
-                        fallback_opts = dict(ydl_opts)
-                        fallback_opts.pop("cookiefile", None)
-                        fallback_opts["source_address"] = "0.0.0.0"
-                        fallback_opts["extractor_args"] = {
-                            "twitter": {"api": ["syndication"]},
-                            "youtube": {"player_client": ["web_embedded", "android", "tv"]}
+                    logger.warning(f"Primary yt-dlp download failed on {url}: {first_err}")
+                    
+                    if is_yt and ("403" in err_str or "forbidden" in err_str or "format" in err_str):
+                        logger.warning(f"HTTP 403 on YouTube {url}. Retrying with iOS HLS / progressive stream fallback...")
+                        # Fallback 1: iOS HLS & progressive direct streams (bypasses GVS SABR chunk 403 blocks)
+                        fb1_opts = dict(ydl_opts)
+                        fb1_opts["extractor_args"] = {
+                            "youtube": {"player_client": ["ios", "mweb"]}
                         }
                         if not is_audio:
-                            fallback_opts["format"] = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-                        with yt_dlp.YoutubeDL(fallback_opts) as ydl2:
-                            info = ydl2.extract_info(url, download=True)
-                            fname = ydl2.prepare_filename(info)
-                            if is_audio:
-                                fname = os.path.splitext(fname)[0] + ".mp3"
-                            elif not fname.endswith(".mp4"):
-                                base = os.path.splitext(fname)[0]
-                                if os.path.exists(base + ".mp4"):
-                                    fname = base + ".mp4"
-                            return fname, info
-                    elif ("sign in" in err_str or "confirm your age" in err_str or "bot" in err_str) and is_yt:
-                        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-                            logger.info(f"Sign-in/age gate on {url}. Retrying with cookies...")
-                            fallback_opts = dict(ydl_opts)
-                            fallback_opts["cookiefile"] = COOKIE_FILE_PATH
-                            with yt_dlp.YoutubeDL(fallback_opts) as ydl3:
-                                info = ydl3.extract_info(url, download=True)
-                                fname = ydl3.prepare_filename(info)
+                            fb1_opts["format"] = "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best"
+                        fb1_opts["concurrent_fragment_downloads"] = 1
+                        try:
+                            with yt_dlp.YoutubeDL(fb1_opts) as ydl_fb1:
+                                info = ydl_fb1.extract_info(url, download=True)
+                                fname = ydl_fb1.prepare_filename(info)
                                 if is_audio:
                                     fname = os.path.splitext(fname)[0] + ".mp3"
                                 elif not fname.endswith(".mp4"):
@@ -1533,6 +1590,55 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                                     if os.path.exists(base + ".mp4"):
                                         fname = base + ".mp4"
                                 return fname, info
+                        except Exception as fb1_err:
+                            logger.warning(f"Fallback 1 (iOS HLS) failed: {fb1_err}")
+
+                        # Fallback 2: Clean unauthenticated Android & TV Downgraded client
+                        logger.warning(f"Retrying YouTube {url} with Android/TV Downgraded client...")
+                        fb2_opts = dict(ydl_opts)
+                        fb2_opts.pop("cookiefile", None)
+                        fb2_opts["extractor_args"] = {
+                            "youtube": {"player_client": ["android", "tv_downgraded"]}
+                        }
+                        if not is_audio:
+                            fb2_opts["format"] = "best[ext=mp4]/bestvideo+bestaudio/best"
+                        fb2_opts["concurrent_fragment_downloads"] = 1
+                        try:
+                            with yt_dlp.YoutubeDL(fb2_opts) as ydl_fb2:
+                                info = ydl_fb2.extract_info(url, download=True)
+                                fname = ydl_fb2.prepare_filename(info)
+                                if is_audio:
+                                    fname = os.path.splitext(fname)[0] + ".mp3"
+                                elif not fname.endswith(".mp4"):
+                                    base = os.path.splitext(fname)[0]
+                                    if os.path.exists(base + ".mp4"):
+                                        fname = base + ".mp4"
+                                return fname, info
+                        except Exception as fb2_err:
+                            logger.warning(f"Fallback 2 (Android/TV) failed: {fb2_err}")
+
+                    elif is_yt and ("sign in" in err_str or "confirm your age" in err_str or "bot" in err_str):
+                        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+                            logger.info(f"Sign-in/age gate on {url}. Retrying with full cookies...")
+                            fb_auth_opts = dict(ydl_opts)
+                            fb_auth_opts["cookiefile"] = COOKIE_FILE_PATH
+                            fb_auth_opts["extractor_args"] = {
+                                "youtube": {"player_client": ["web", "mweb", "ios"]}
+                            }
+                            try:
+                                with yt_dlp.YoutubeDL(fb_auth_opts) as ydl_auth:
+                                    info = ydl_auth.extract_info(url, download=True)
+                                    fname = ydl_auth.prepare_filename(info)
+                                    if is_audio:
+                                        fname = os.path.splitext(fname)[0] + ".mp3"
+                                    elif not fname.endswith(".mp4"):
+                                        base = os.path.splitext(fname)[0]
+                                        if os.path.exists(base + ".mp4"):
+                                            fname = base + ".mp4"
+                                    return fname, info
+                            except Exception as fb_auth_err:
+                                logger.warning(f"Auth retry failed: {fb_auth_err}")
+
                     raise first_err
 
             fname, info = await loop.run_in_executor(None, run_ydl)
@@ -1557,6 +1663,13 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     "🔒 **YouTube Bot Verification Required**\n\n"
                     "YouTube blocked this cloud server IP for this video.\n\n"
                     "💡 **Fix:** Export your `cookies.txt` with the *'Get cookies.txt LOCALLY'* extension and set the `COOKIES_CONTENT` environment variable in your Render dashboard."
+                )
+                await status_msg.edit_text(user_friendly_err, parse_mode="Markdown")
+            elif "403" in err_msg.lower() or "forbidden" in err_msg.lower():
+                user_friendly_err = (
+                    "🚫 **YouTube 403 Forbidden**\n\n"
+                    "YouTube's video stream rejected the connection from the cloud server IP.\n\n"
+                    "💡 **Tip:** If you have active YouTube cookies, update `COOKIES_CONTENT` on Render, or try another video format."
                 )
                 await status_msg.edit_text(user_friendly_err, parse_mode="Markdown")
             else:
