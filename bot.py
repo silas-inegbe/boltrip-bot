@@ -87,55 +87,10 @@ if COOKIES_ENV:
     except Exception as e:
         logger.warning(f"Could not write COOKIES_CONTENT: {e}")
 
-YT_COOKIE_FILE_PATH = os.path.join(os.path.dirname(__file__), 'clean_yt_cookies.txt')
-
-def sanitize_youtube_cookies(src_path, dst_path):
-    """
-    Sanitizes YouTube cookies by filtering out short-lived, volatile session tokens
-    (__Secure-1PSIDTS, __Secure-3PSIDTS, SIDCC, *PSIDCC, YSC) which expire every 1-2 hours
-    and cause HTTP 403 Forbidden errors when stale. Keeps long-lived authentication and session
-    cookies (LOGIN_INFO, HSID, SSID, APISID, SAPISID, SID, __Secure-*PSID, __Secure-*PAPISID,
-    VISITOR_INFO1_LIVE, PREF, SOCS).
-    """
-    if not os.path.exists(src_path) or os.path.getsize(src_path) == 0:
-        return None
-    try:
-        with open(src_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
-        
-        volatile_tokens = ('PSIDTS', 'SIDCC', 'YSC')
-        clean_lines = []
-        has_yt = False
-        for line in lines:
-            if not line.strip() or line.startswith('#'):
-                clean_lines.append(line)
-                continue
-            if 'youtube.com' in line or 'google.com' in line:
-                has_yt = True
-                if any(vt in line for vt in volatile_tokens):
-                    continue
-            clean_lines.append(line)
-        
-        if not has_yt:
-            return src_path
-            
-        with open(dst_path, 'w', encoding='utf-8') as f:
-            f.writelines(clean_lines)
-        return dst_path
-    except Exception as e:
-        logger.warning(f"Could not sanitize YouTube cookies: {e}")
-        return src_path
-
 def get_yt_cookie_file():
-    if os.path.exists(YT_COOKIE_FILE_PATH) and os.path.getsize(YT_COOKIE_FILE_PATH) > 0:
-        return YT_COOKIE_FILE_PATH
     if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-        return sanitize_youtube_cookies(COOKIE_FILE_PATH, YT_COOKIE_FILE_PATH)
+        return COOKIE_FILE_PATH
     return None
-
-# Perform initial sanitization on startup if cookies exist
-if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-    sanitize_youtube_cookies(COOKIE_FILE_PATH, YT_COOKIE_FILE_PATH)
 
 PROXY_URL = os.environ.get('PROXY_URL') or os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY')
 if PROXY_URL:
@@ -1569,15 +1524,16 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     err_str = str(first_err).lower()
                     logger.warning(f"Primary yt-dlp download failed on {url}: {first_err}")
                     
-                    if is_yt and ("403" in err_str or "forbidden" in err_str or "format" in err_str):
-                        logger.warning(f"HTTP 403 on YouTube {url}. Retrying with iOS HLS / progressive stream fallback...")
-                        # Fallback 1: iOS HLS & progressive direct streams (bypasses GVS SABR chunk 403 blocks)
+                    if is_yt:
+                        # Fallback 1: Unauthenticated Android & TV Downgraded client (bypasses browser bot check)
+                        logger.warning(f"Retrying YouTube {url} with Android / TV Downgraded client...")
                         fb1_opts = dict(ydl_opts)
+                        fb1_opts.pop("cookiefile", None)
                         fb1_opts["extractor_args"] = {
-                            "youtube": {"player_client": ["ios", "mweb"]}
+                            "youtube": {"player_client": ["android", "tv_downgraded"]}
                         }
                         if not is_audio:
-                            fb1_opts["format"] = "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best"
+                            fb1_opts["format"] = "best[ext=mp4]/bestvideo+bestaudio/best"
                         fb1_opts["concurrent_fragment_downloads"] = 1
                         try:
                             with yt_dlp.YoutubeDL(fb1_opts) as ydl_fb1:
@@ -1591,17 +1547,17 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                                         fname = base + ".mp4"
                                 return fname, info
                         except Exception as fb1_err:
-                            logger.warning(f"Fallback 1 (iOS HLS) failed: {fb1_err}")
+                            logger.warning(f"Fallback 1 (Android/TV) failed: {fb1_err}")
 
-                        # Fallback 2: Clean unauthenticated Android & TV Downgraded client
-                        logger.warning(f"Retrying YouTube {url} with Android/TV Downgraded client...")
+                        # Fallback 2: iOS HLS & progressive direct streams (bypasses GVS SABR chunk 403 blocks)
+                        logger.warning(f"Retrying YouTube {url} with iOS HLS client...")
                         fb2_opts = dict(ydl_opts)
                         fb2_opts.pop("cookiefile", None)
                         fb2_opts["extractor_args"] = {
-                            "youtube": {"player_client": ["android", "tv_downgraded"]}
+                            "youtube": {"player_client": ["ios", "mweb"]}
                         }
                         if not is_audio:
-                            fb2_opts["format"] = "best[ext=mp4]/bestvideo+bestaudio/best"
+                            fb2_opts["format"] = "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best"
                         fb2_opts["concurrent_fragment_downloads"] = 1
                         try:
                             with yt_dlp.YoutubeDL(fb2_opts) as ydl_fb2:
@@ -1615,29 +1571,31 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                                         fname = base + ".mp4"
                                 return fname, info
                         except Exception as fb2_err:
-                            logger.warning(f"Fallback 2 (Android/TV) failed: {fb2_err}")
+                            logger.warning(f"Fallback 2 (iOS HLS) failed: {fb2_err}")
 
-                    elif is_yt and ("sign in" in err_str or "confirm your age" in err_str or "bot" in err_str):
-                        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-                            logger.info(f"Sign-in/age gate on {url}. Retrying with full cookies...")
-                            fb_auth_opts = dict(ydl_opts)
-                            fb_auth_opts["cookiefile"] = COOKIE_FILE_PATH
-                            fb_auth_opts["extractor_args"] = {
-                                "youtube": {"player_client": ["web", "mweb", "ios"]}
-                            }
-                            try:
-                                with yt_dlp.YoutubeDL(fb_auth_opts) as ydl_auth:
-                                    info = ydl_auth.extract_info(url, download=True)
-                                    fname = ydl_auth.prepare_filename(info)
-                                    if is_audio:
-                                        fname = os.path.splitext(fname)[0] + ".mp3"
-                                    elif not fname.endswith(".mp4"):
-                                        base = os.path.splitext(fname)[0]
-                                        if os.path.exists(base + ".mp4"):
-                                            fname = base + ".mp4"
-                                    return fname, info
-                            except Exception as fb_auth_err:
-                                logger.warning(f"Auth retry failed: {fb_auth_err}")
+                        # Fallback 3: Web Embedded client
+                        logger.warning(f"Retrying YouTube {url} with Web Embedded client...")
+                        fb3_opts = dict(ydl_opts)
+                        fb3_opts.pop("cookiefile", None)
+                        fb3_opts["extractor_args"] = {
+                            "youtube": {"player_client": ["web_embedded"]}
+                        }
+                        if not is_audio:
+                            fb3_opts["format"] = "best[ext=mp4]/best"
+                        fb3_opts["concurrent_fragment_downloads"] = 1
+                        try:
+                            with yt_dlp.YoutubeDL(fb3_opts) as ydl_fb3:
+                                info = ydl_fb3.extract_info(url, download=True)
+                                fname = ydl_fb3.prepare_filename(info)
+                                if is_audio:
+                                    fname = os.path.splitext(fname)[0] + ".mp3"
+                                elif not fname.endswith(".mp4"):
+                                    base = os.path.splitext(fname)[0]
+                                    if os.path.exists(base + ".mp4"):
+                                        fname = base + ".mp4"
+                                return fname, info
+                        except Exception as fb3_err:
+                            logger.warning(f"Fallback 3 (Web Embedded) failed: {fb3_err}")
 
                     raise first_err
 
@@ -1661,8 +1619,15 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             if "confirm you" in err_msg.lower() and "bot" in err_msg.lower():
                 user_friendly_err = (
                     "🔒 **YouTube Bot Verification Required**\n\n"
-                    "YouTube blocked this cloud server IP for this video.\n\n"
-                    "💡 **Fix:** Export your `cookies.txt` with the *'Get cookies.txt LOCALLY'* extension and set the `COOKIES_CONTENT` environment variable in your Render dashboard."
+                    "YouTube blocked anonymous requests from this server IP.\n\n"
+                    "💡 **How to fix this permanently (1-minute setup):**\n"
+                    "1. Open an **Incognito / Private Window** in your browser.\n"
+                    "2. Go to `https://www.youtube.com` and log in.\n"
+                    "3. In the exact same tab, visit: `https://www.youtube.com/robots.txt`\n"
+                    "4. Click **'Get cookies.txt LOCALLY'** to export your cookies.\n"
+                    "5. **Close the Incognito window immediately** (do not browse further).\n"
+                    "6. Paste the contents into `COOKIES_CONTENT` on Render.\n\n"
+                    "*(Closing the window freezes the session so Google never rotates it!)*"
                 )
                 await status_msg.edit_text(user_friendly_err, parse_mode="Markdown")
             elif "403" in err_msg.lower() or "forbidden" in err_msg.lower():
