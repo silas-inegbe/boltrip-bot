@@ -831,8 +831,8 @@ def extract_threads_shortcode(url: str):
 
 def fetch_threads_direct(url: str):
     try:
-        fetch_url = url.replace("threads.net", "threads.com")
         code = extract_threads_shortcode(url)
+        fetch_url = f"https://www.threads.com/t/{code}" if code else url.replace("threads.net", "threads.com")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
@@ -895,6 +895,17 @@ def fetch_threads_direct(url: str):
         image_candidates = (target_post.get("image_versions2") or {}).get("candidates") or []
         carousel_media = target_post.get("carousel_media") or []
 
+        # If direct media not found, check quote post or repost
+        share_info = (target_post.get("text_post_app_info") or {}).get("share_info") or {}
+        quoted_post = share_info.get("quoted_post") or share_info.get("quoted_attachment_post") or share_info.get("reposted_post")
+        if quoted_post and isinstance(quoted_post, dict):
+            if not video_versions and quoted_post.get("video_versions"):
+                video_versions = quoted_post.get("video_versions")
+            if not carousel_media and quoted_post.get("carousel_media"):
+                carousel_media = quoted_post.get("carousel_media")
+            if not image_candidates and (quoted_post.get("image_versions2") or {}).get("candidates"):
+                image_candidates = quoted_post["image_versions2"]["candidates"]
+
         has_video = False
         media_url = None
         ext = "mp4"
@@ -920,6 +931,33 @@ def fetch_threads_direct(url: str):
             has_video = False
             media_url = image_candidates[0]["url"]
             ext = "jpg"
+
+        # Check for external embedded link preview (e.g. Instagram Reel, YouTube, etc.)
+        if not media_url:
+            link_preview = (target_post.get("text_post_app_info") or {}).get("link_preview_attachment") or {}
+            preview_url = link_preview.get("url")
+            if preview_url:
+                return {
+                    "title": (link_preview.get("title") or title)[:100],
+                    "author": author[:60],
+                    "is_tiktok": False,
+                    "is_threads": False,
+                    "has_video": True,
+                    "resolved_url": preview_url,
+                    "is_external_link": True,
+                }
+            preview_img = link_preview.get("image_url")
+            if preview_img:
+                return {
+                    "title": (link_preview.get("title") or title)[:100],
+                    "author": author[:60],
+                    "is_tiktok": False,
+                    "is_threads": True,
+                    "has_video": False,
+                    "media_url": preview_img,
+                    "ext": "jpg",
+                    "resolved_url": url,
+                }
 
         if not media_url:
             return None
@@ -1771,11 +1809,12 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
     loop = asyncio.get_running_loop()
 
-    def fetch_meta():
+    def fetch_meta(target_url=None):
+        u = target_url or url
         # Fast oEmbed path for YouTube (100% reliable, zero player-response errors)
-        if "youtube.com" in url or "youtu.be" in url:
+        if "youtube.com" in u or "youtu.be" in u:
             try:
-                oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url)}&format=json"
+                oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(u)}&format=json"
                 req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
                 with urllib.request.urlopen(req, timeout=5) as r:
                     data = json.loads(r.read().decode())
@@ -1783,14 +1822,15 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                         return {
                             "title": data.get("title", "YouTube Video")[:80],
                             "author": data.get("author_name", "YouTube Creator"),
-                            "is_tiktok": False
+                            "is_tiktok": False,
+                            "resolved_url": u,
                         }
             except Exception:
                 pass
 
-        if is_tiktok_url(url):
+        if is_tiktok_url(u):
             try:
-                api_url = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}"
+                api_url = f"https://www.tikwm.com/api/?url={urllib.parse.quote(u)}"
                 req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read().decode())
@@ -1799,30 +1839,41 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                         return {
                             "title": d.get("title", "TikTok Video")[:80],
                             "author": d.get("author", {}).get("nickname", "TikTok Creator"),
-                            "is_tiktok": True
+                            "is_tiktok": True,
+                            "resolved_url": u,
                         }
             except Exception:
                 pass
 
-        if is_facebook_url(url):
-            fb_meta = fetch_facebook_direct(url)
+        if is_facebook_url(u):
+            fb_meta = fetch_facebook_direct(u)
             if fb_meta:
                 return {
                     "title": fb_meta.get("title", "Facebook Video")[:80],
                     "author": fb_meta.get("author", "Facebook Creator"),
                     "is_tiktok": False,
                     "is_facebook": True,
+                    "resolved_url": u,
                 }
 
-        if is_pinterest_url(url):
-            pin_meta = fetch_pinterest_direct(url)
+        if is_pinterest_url(u):
+            pin_meta = fetch_pinterest_direct(u)
             if pin_meta:
                 return pin_meta
 
-        if is_threads_url(url):
-            threads_meta = fetch_threads_direct(url)
+        if is_threads_url(u):
+            threads_meta = fetch_threads_direct(u)
             if threads_meta:
+                if threads_meta.get("is_external_link") and threads_meta.get("resolved_url"):
+                    ext_url = threads_meta["resolved_url"]
+                    logger.info(f"Threads post links to external media: {ext_url}")
+                    ext_meta = fetch_meta(ext_url)
+                    if ext_meta:
+                        ext_meta["resolved_url"] = ext_url
+                        return ext_meta
                 return threads_meta
+            else:
+                raise Exception("Threads: No downloadable video, photo, or media attachment found on this post.")
 
         opts = {
             "quiet": True,
@@ -1836,7 +1887,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         }
         if CHROME_IMPERSONATE:
             opts["impersonate"] = CHROME_IMPERSONATE
-        is_yt = ("youtube.com" in url or "youtu.be" in url)
+        is_yt = ("youtube.com" in u or "youtu.be" in u)
         if is_yt:
             yt_c = get_yt_cookie_file()
             if yt_c and os.path.exists(yt_c):
@@ -1848,11 +1899,12 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         if FFMPEG_PATH:
             opts["ffmpeg_location"] = FFMPEG_PATH
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(u, download=False)
             return {
                 "title": (info.get("title") or "Media")[:80],
                 "author": info.get("uploader", info.get("channel", "Creator")),
-                "is_tiktok": False
+                "is_tiktok": False,
+                "resolved_url": u,
             }
 
     try:
@@ -1866,15 +1918,23 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                 "• Or the post might be restricted to 1st-degree connections, private, or deleted."
             )
             await status_msg.edit_text(friendly_err, parse_mode="Markdown")
+        elif "threads" in err_text.lower() and ("no downloadable" in err_text.lower() or "no media" in err_text.lower() or "unsupported url" in err_text.lower()):
+            friendly_err = (
+                "⚠️ **No video or photo found on this Threads post.**\n\n"
+                "• This post might only contain text without any attached video or image.\n"
+                "• Or the post might be restricted, private, or deleted."
+            )
+            await status_msg.edit_text(friendly_err, parse_mode="Markdown")
         else:
             await status_msg.edit_text(f"❌ **Failed to load link:**\n`{err_text[:200]}`", parse_mode="Markdown")
         return
 
+    target_url = meta.get("resolved_url") or url
     title = meta.get("title", "Media")
     author = meta.get("author", "Creator")
-    logger.info(f"🔍 [METADATA] Extracted: '{title[:45]}' | Creator: '{author}'")
+    logger.info(f"🔍 [METADATA] Extracted: '{title[:45]}' | Creator: '{author}' (target_url: {target_url})")
     MEDIA_CACHE[cache_id] = {
-        "url": url,
+        "url": target_url,
         "title": title,
         "author": author,
         "is_pinterest": meta.get("is_pinterest", False),
@@ -1894,7 +1954,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         ACTIVE_TASKS[cache_id] = t
         return
 
-    platform = get_platform_info(url)
+    platform = get_platform_info(target_url)
     reply_markup = get_quality_keyboard(cache_id, platform)
 
     await status_msg.edit_text(
