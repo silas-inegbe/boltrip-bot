@@ -128,6 +128,7 @@ URL_REGEX = re.compile(r'(https?://[^\s]+)')
 
 ACTIVE_TASKS = {}
 ACTIVE_SUBPROCESSES = {}
+GLOBAL_BOT = None
 
 class ProgressFileReader:
     def __init__(self, filename, cache_id=None, callback=None):
@@ -254,8 +255,8 @@ def resolve_url(url: str) -> str:
     # Let our specialized extractors handle Facebook natively — do not resolve to login pages
     if "facebook.com" in url or "fb.com" in url or "fb.watch" in url:
         return url
-    # Full pin and post links are already direct — skip redirect resolution
-    if any(k in url for k in ["pinterest.com/pin/", "linkedin.com/posts/", "linkedin.com/feed/", "linkedin.com/video/"]):
+    # Full pin, post, and thread links are already direct — skip redirect resolution
+    if any(k in url for k in ["pinterest.com/pin/", "linkedin.com/posts/", "linkedin.com/feed/", "linkedin.com/video/", "threads.net/", "threads.com/"]):
         return url
     try:
         # For short-links like pin.it, lnkd.in, use curl_cffi with Chrome TLS impersonation
@@ -309,6 +310,10 @@ def is_pinterest_url(url: str) -> bool:
 def is_linkedin_url(url: str) -> bool:
     u = url.lower()
     return 'linkedin.com' in u or 'lnkd.in' in u
+
+def is_threads_url(url: str) -> bool:
+    u = url.lower()
+    return 'threads.net' in u or 'threads.com' in u
 
 def format_progress_bar(percent, length=12):
     percent = max(0.0, min(100.0, percent))
@@ -393,9 +398,14 @@ def get_platform_info(url: str) -> str:
         return 'pinterest'
     elif 'linkedin.com' in u or 'lnkd.in' in u:
         return 'linkedin'
+    elif 'threads.net' in u or 'threads.com' in u:
+        return 'threads'
     return 'general'
 
 def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
+    cached = MEDIA_CACHE.get(cache_id, {})
+    has_video = cached.get("has_video", True)
+
     if platform == 'tiktok':
         buttons = [
             [InlineKeyboardButton("🎬 Download HD (No Watermark)", callback_data=f"vidbest:{cache_id}")],
@@ -408,8 +418,32 @@ def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
             [get_cancel_button(cache_id, "❌ Cancel")]
         ]
-    elif platform in ['instagram', 'pinterest', 'linkedin']:
-        label = "Reel / Post" if platform == 'instagram' else ("Pin" if platform == 'pinterest' else "Post")
+    elif platform == 'threads':
+        if not has_video:
+            buttons = [
+                [InlineKeyboardButton("🖼️ Download Threads Photo (HD)", callback_data=f"vidbest:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+        else:
+            buttons = [
+                [InlineKeyboardButton("🎬 Download Threads Post (HD)", callback_data=f"vidbest:{cache_id}")],
+                [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+    elif platform == 'pinterest':
+        if not has_video:
+            buttons = [
+                [InlineKeyboardButton("🖼️ Download Pin Image (HD)", callback_data=f"vidbest:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+        else:
+            buttons = [
+                [InlineKeyboardButton("🎬 Download Pin (HD)", callback_data=f"vidbest:{cache_id}")],
+                [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+    elif platform in ['instagram', 'linkedin']:
+        label = "Reel / Post" if platform == 'instagram' else "Post"
         buttons = [
             [InlineKeyboardButton(f"🎬 Download {label} (HD)", callback_data=f"vidbest:{cache_id}")],
             [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
@@ -789,6 +823,183 @@ def download_pinterest_direct(url, cache_id, progress_hook=None, direct_media_ur
         logger.warning(f"Pinterest direct download error: {e}")
     return None
 
+def extract_threads_shortcode(url: str):
+    m = re.search(r'/post/([a-zA-Z0-9_-]+)', url)
+    if not m:
+        m = re.search(r'/t/([a-zA-Z0-9_-]+)', url)
+    return m.group(1) if m else None
+
+def fetch_threads_direct(url: str):
+    try:
+        fetch_url = url.replace("threads.net", "threads.com")
+        code = extract_threads_shortcode(url)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        if curl_requests:
+            r = curl_requests.get(fetch_url, headers=headers, impersonate="chrome", timeout=12)
+            html = r.text if r.status_code == 200 else ""
+        else:
+            req = urllib.request.Request(fetch_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                html = resp.read().decode('utf-8', errors='ignore')
+
+        if not html:
+            return None
+
+        scripts = re.findall(r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>', html)
+        target_post = None
+        for s in scripts:
+            if "thread_items" in s or (code and code in s):
+                try:
+                    data = json.loads(s)
+                    def find_post(obj):
+                        if isinstance(obj, dict):
+                            if code and obj.get("code") == code:
+                                return obj
+                            if "thread_items" in obj and obj["thread_items"]:
+                                for ti in obj["thread_items"]:
+                                    p = ti.get("post")
+                                    if p and isinstance(p, dict):
+                                        if not code or p.get("code") == code:
+                                            return p
+                            for v in obj.values():
+                                res = find_post(v)
+                                if res:
+                                    return res
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                res = find_post(item)
+                                if res:
+                                    return res
+                        return None
+
+                    found = find_post(data)
+                    if found:
+                        target_post = found
+                        break
+                except Exception:
+                    pass
+
+        if not target_post:
+            return None
+
+        user = target_post.get("user") or {}
+        author = user.get("username") or user.get("full_name") or "Threads User"
+        caption_dict = target_post.get("caption") or {}
+        caption_text = caption_dict.get("text", "") if isinstance(caption_dict, dict) else ""
+        title = caption_text.strip() if caption_text.strip() else f"Threads post by @{author}"
+
+        video_versions = target_post.get("video_versions") or []
+        image_candidates = (target_post.get("image_versions2") or {}).get("candidates") or []
+        carousel_media = target_post.get("carousel_media") or []
+
+        has_video = False
+        media_url = None
+        ext = "mp4"
+
+        if video_versions:
+            has_video = True
+            media_url = video_versions[0]["url"]
+            ext = "mp4"
+        elif carousel_media:
+            first_item = carousel_media[0]
+            c_vv = first_item.get("video_versions") or []
+            if c_vv:
+                has_video = True
+                media_url = c_vv[0]["url"]
+                ext = "mp4"
+            else:
+                c_iv = (first_item.get("image_versions2") or {}).get("candidates") or []
+                if c_iv:
+                    has_video = False
+                    media_url = c_iv[0]["url"]
+                    ext = "jpg"
+        elif image_candidates:
+            has_video = False
+            media_url = image_candidates[0]["url"]
+            ext = "jpg"
+
+        if not media_url:
+            return None
+
+        return {
+            "title": title[:100],
+            "author": author[:60],
+            "is_tiktok": False,
+            "is_threads": True,
+            "has_video": has_video,
+            "media_url": media_url,
+            "ext": ext,
+            "resolved_url": url,
+        }
+    except Exception as e:
+        logger.warning(f"Threads direct meta extraction error: {e}")
+        return None
+
+def download_threads_direct(url, cache_id, progress_hook=None, direct_media_url=None, ext="mp4"):
+    media_url = direct_media_url
+    if not media_url:
+        meta = fetch_threads_direct(url)
+        if not meta or not meta.get("media_url"):
+            return None
+        media_url = meta["media_url"]
+        ext = meta.get("ext", "mp4")
+
+    out_path = os.path.join(DOWNLOAD_DIR, f"dl_{cache_id}_threads.{ext}")
+    try:
+        if curl_requests:
+            resp = curl_requests.get(media_url, impersonate="chrome", stream=True, timeout=30)
+            if resp.status_code != 200:
+                return None
+            total = int(resp.headers.get("content-length", 0))
+            downloaded = 0
+            start_time = time.time()
+            with open(out_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_hook:
+                        elapsed = max(time.time() - start_time, 0.1)
+                        speed = downloaded / elapsed
+                        progress_hook({
+                            "status": "downloading",
+                            "downloaded_bytes": downloaded,
+                            "total_bytes": total,
+                            "speed": speed,
+                            "eta": int((total - downloaded) / speed) if speed > 0 and total > downloaded else 0
+                        })
+        else:
+            req = urllib.request.Request(media_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r, open(out_path, "wb") as f:
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                chunk_size = 64 * 1024
+                start_time = time.time()
+                while True:
+                    chunk = r.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_hook:
+                        elapsed = max(time.time() - start_time, 0.1)
+                        speed = downloaded / elapsed
+                        progress_hook({
+                            "status": "downloading",
+                            "downloaded_bytes": downloaded,
+                            "total_bytes": total,
+                            "speed": speed,
+                            "eta": int((total - downloaded) / speed) if speed > 0 and total > downloaded else 0
+                        })
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as e:
+        logger.warning(f"Threads direct download error: {e}")
+    return None
+
+
 
 def render_expired_page():
     return """<!DOCTYPE html>
@@ -907,9 +1118,9 @@ def render_download_page(file_id, filename, file_size_mb, is_video=True, is_audi
 
     media_player_html = ""
     if is_video:
-        media_player_html = f'<video controls playsinline webkit-playsinline preload="metadata"><source src="{stream_url}" type="video/mp4">Your browser does not support HTML5 video.</video>'
+        media_player_html = f'<video controls playsinline webkit-playsinline preload="metadata" onplay="notifyDownloaded()"><source src="{stream_url}" type="video/mp4">Your browser does not support HTML5 video.</video>'
     elif is_audio:
-        media_player_html = f'<audio controls preload="metadata"><source src="{stream_url}" type="audio/mpeg">Your browser does not support audio.</audio>'
+        media_player_html = f'<audio controls preload="metadata" onplay="notifyDownloaded()"><source src="{stream_url}" type="audio/mpeg">Your browser does not support audio.</audio>'
 
     author_html = f'<div class="author">By {clean_author}</div>' if clean_author else ''
     badge_html = f'<span class="badge">{res_badge}</span>' if res_badge else ''
@@ -1202,7 +1413,7 @@ def render_download_page(file_id, filename, file_size_mb, is_video=True, is_audi
     </div>
 
     <div class="actions-card">
-      <a href="{raw_url}" download="{safe_download_name}" class="btn btn-primary" id="downloadBtn">
+      <a href="{raw_url}" download="{safe_download_name}" class="btn btn-primary" id="downloadBtn" onclick="notifyDownloaded()">
         📥 Save / Download File
       </a>
       <button class="btn btn-secondary" onclick="copyDirectLink()">
@@ -1230,6 +1441,13 @@ def render_download_page(file_id, filename, file_size_mb, is_video=True, is_audi
     const isTelegram = navigator.userAgent.includes('Telegram') || navigator.userAgent.includes('TG');
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 
+    function notifyDownloaded() {{
+      fetch('/download/{file_id}?ping=1').catch(() => {{}});
+    }}
+
+    // Auto-ping when the download page opens
+    notifyDownloaded();
+
     if (isTelegram) {{
       const tipBody = document.getElementById('tipBody');
       if (isIOS) {{
@@ -1243,6 +1461,7 @@ def render_download_page(file_id, filename, file_size_mb, is_video=True, is_audi
     }}
 
     function copyDirectLink() {{
+      notifyDownloaded();
       const fullUrl = window.location.origin + '{raw_url}';
       navigator.clipboard.writeText(fullUrl).then(() => {{
         showToast('Direct download link copied!');
@@ -1268,6 +1487,52 @@ def render_download_page(file_id, filename, file_size_mb, is_video=True, is_audi
 </html>
 """
 
+async def notify_telegram_downloaded(cache_id: str):
+    """Pings the Telegram bot that a phone download occurred, updating the warning message."""
+    try:
+        global GLOBAL_BOT
+        if not GLOBAL_BOT:
+            return
+        cached_item = MEDIA_CACHE.get(cache_id, {})
+        if not cached_item or cached_item.get("download_notified"):
+            return
+
+        chat_id = cached_item.get("chat_id")
+        status_msg_id = cached_item.get("status_msg_id")
+        if not chat_id or not status_msg_id:
+            return
+
+        cached_item["download_notified"] = True
+        save_cache(MEDIA_CACHE)
+
+        title = cached_item.get("title") or "Media File"
+        size_mb = cached_item.get("size_mb", 0.0)
+        if not size_mb:
+            file_path = cached_item.get("file_path")
+            if file_path and os.path.exists(file_path):
+                size_mb = os.path.getsize(file_path) / (1024 * 1024)
+
+        import html
+        t_clean = html.escape(title[:70])
+        size_str = f"\n📦 <code>{size_mb:.1f} MB</code>" if size_mb > 0 else ""
+        text = (
+            "✅ <b>Downloaded via Phone Browser</b>\n\n"
+            f"🎬 <b>{t_clean}</b>"
+            f"{size_str}\n\n"
+            "⚡ <i>Thanks for using @Boltrip_bot!</i>"
+        )
+
+        await GLOBAL_BOT.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_msg_id,
+            text=text,
+            reply_markup=get_post_download_keyboard(),
+            parse_mode="HTML"
+        )
+        logger.info(f"📲 [PHONE DOWNLOAD NOTIFIED] Successfully updated message for {cache_id} in chat {chat_id}")
+    except Exception as e:
+        logger.warning(f"Could not notify Telegram of phone download: {e}")
+
 def prune_expired_downloads():
     try:
         now = time.time()
@@ -1284,6 +1549,12 @@ def prune_expired_downloads():
 async def handle_direct_download(request):
     prune_expired_downloads()
     file_id = request.match_info.get("file_id")
+
+    # Handle asynchronous ping notification from web page/browser
+    if request.query.get("ping") == "1":
+        asyncio.create_task(notify_telegram_downloaded(file_id))
+        return web.Response(text="OK")
+
     matching = glob.glob(os.path.join(DOWNLOAD_DIR, f"*{file_id}*"))
     matching = [m for m in matching if not m.endswith(".part") and os.path.isfile(m)]
     if not matching:
@@ -1322,6 +1593,7 @@ async def handle_direct_download(request):
 
     if raw_param or is_cli:
         logger.info(f"🌐 [PHONE DOWNLOAD RAW] Client downloaded '{filename}' ({size_mb:.1f} MB)")
+        asyncio.create_task(notify_telegram_downloaded(file_id))
         headers = {
             "Content-Type": content_type,
             "Content-Disposition": f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{encoded_filename}',
@@ -1372,6 +1644,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• YouTube (Videos & Shorts)\n"
         "• TikTok (No watermark)\n"
         "• Instagram (Reels & Posts)\n"
+        "• Threads (Videos & Photos)\n"
         "• X / Twitter\n"
         "• Pinterest\n"
         "• Facebook & Reddit\n\n"
@@ -1546,6 +1819,11 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             if pin_meta:
                 return pin_meta
 
+        if is_threads_url(url):
+            threads_meta = fetch_threads_direct(url)
+            if threads_meta:
+                return threads_meta
+
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -1600,6 +1878,7 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         "title": title,
         "author": author,
         "is_pinterest": meta.get("is_pinterest", False),
+        "is_threads": meta.get("is_threads", False),
         "media_url": meta.get("media_url"),
         "ext": meta.get("ext", "mp4"),
         "has_video": meta.get("has_video", True),
@@ -1740,6 +2019,11 @@ async def execute_compression_and_upload(update, context, status_msg, cache_id, 
         success = False
 
     if not success or not os.path.exists(compressed_path):
+        cached_item = MEDIA_CACHE.get(cache_id, {})
+        cached_item["chat_id"] = update.effective_chat.id
+        cached_item["status_msg_id"] = status_msg.message_id
+        MEDIA_CACHE[cache_id] = cached_item
+        save_cache(MEDIA_CACHE)
         await status_msg.edit_text(
             f"⚠️ Compression failed or cancelled.\nYou can still download the high-res file directly to your phone:",
             reply_markup=get_large_file_keyboard(cache_id, is_audio=False)
@@ -1749,6 +2033,12 @@ async def execute_compression_and_upload(update, context, status_msg, cache_id, 
     comp_size_mb = os.path.getsize(compressed_path) / (1024 * 1024)
     logger.info(f"🗜️ [COMPRESS COMPLETE] Compressed {input_path} down to {comp_size_mb:.1f} MB")
     if comp_size_mb > 49.5:
+        cached_item = MEDIA_CACHE.get(cache_id, {})
+        cached_item["chat_id"] = update.effective_chat.id
+        cached_item["status_msg_id"] = status_msg.message_id
+        cached_item["size_mb"] = comp_size_mb
+        MEDIA_CACHE[cache_id] = cached_item
+        save_cache(MEDIA_CACHE)
         await status_msg.edit_text(
             f"⚠️ Compressed file is {comp_size_mb:.1f} MB (still exceeds Telegram's 50 MB limit).\nPlease use the direct phone download:",
             reply_markup=get_large_file_keyboard(cache_id, is_audio=False)
@@ -1769,6 +2059,12 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
     is_audio = (quality == "audio")
     cancel_markup = get_cancel_keyboard(cache_id)
     main_loop = asyncio.get_running_loop()
+
+    # Save chat_id and status_msg_id early
+    cached["chat_id"] = update.effective_chat.id
+    cached["status_msg_id"] = status_msg.message_id
+    MEDIA_CACHE[cache_id] = cached
+    save_cache(MEDIA_CACHE)
 
     # --- 1. INSTANT TELEGRAM FILE_ID CACHE CHECK ---
     cache_key = f"{url}_{quality}"
@@ -1938,6 +2234,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
     is_tiktok = is_tiktok_url(url)
     is_fb = is_facebook_url(url)
     is_pin = is_pinterest_url(url)
+    is_threads = is_threads_url(url)
     downloaded_path = None
 
     if is_tiktok and not is_audio:
@@ -1990,6 +2287,28 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     downloaded_path = mp3_path
         except Exception as e:
             logger.warning(f"Pinterest direct download failed, falling back to yt-dlp: {e}")
+            downloaded_path = None
+
+    if is_threads and not downloaded_path:
+        try:
+            loop = asyncio.get_running_loop()
+            cached_media_url = MEDIA_CACHE.get(cache_id, {}).get("media_url")
+            cached_ext = MEDIA_CACHE.get(cache_id, {}).get("ext", "mp4")
+            downloaded_path = await loop.run_in_executor(
+                None, lambda: download_threads_direct(url, cache_id, progress_hook, direct_media_url=cached_media_url, ext=cached_ext)
+            )
+            if downloaded_path and is_audio and downloaded_path.endswith(".mp4"):
+                mp3_path = os.path.splitext(downloaded_path)[0] + ".mp3"
+                if FFMPEG_PATH:
+                    cmd = [FFMPEG_PATH, "-y", "-i", downloaded_path, "-vn", "-c:a", "libmp3lame", "-q:a", "2", mp3_path]
+                    await loop.run_in_executor(None, lambda: subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True))
+                    try:
+                        os.remove(downloaded_path)
+                    except Exception:
+                        pass
+                    downloaded_path = mp3_path
+        except Exception as e:
+            logger.warning(f"Threads direct download failed, falling back to yt-dlp: {e}")
             downloaded_path = None
 
     if not downloaded_path:
@@ -2223,6 +2542,12 @@ async def deliver_file(update, context, status_msg, cache_id, file_path, is_audi
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
     if file_size_mb >= 49.5:
+        cached_item = MEDIA_CACHE.get(cache_id, {})
+        cached_item["chat_id"] = update.effective_chat.id
+        cached_item["status_msg_id"] = status_msg.message_id
+        cached_item["size_mb"] = file_size_mb
+        MEDIA_CACHE[cache_id] = cached_item
+        save_cache(MEDIA_CACHE)
         await status_msg.edit_text(
             f"⚠️ **File is {file_size_mb:.1f} MB (Telegram Bot limit is 50 MB)**\n\n"
             f"Choose how you want to receive it:\n"
@@ -2386,6 +2711,12 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
             cleanup_files(cache_id)
             return
         logger.error(f"Telegram upload error: {e}")
+        cached_item = MEDIA_CACHE.get(cache_id, {})
+        cached_item["chat_id"] = update.effective_chat.id
+        cached_item["status_msg_id"] = status_msg.message_id
+        cached_item["size_mb"] = file_size_mb
+        MEDIA_CACHE[cache_id] = cached_item
+        save_cache(MEDIA_CACHE)
         await status_msg.edit_text(
             f"⚠️ Direct upload failed: `{str(e)[:150]}`\n\nYou can still download the file to your phone:",
             reply_markup=get_large_file_keyboard(cache_id, is_audio=is_audio)
@@ -2409,6 +2740,8 @@ async def start_web_server():
     logger.info(f"🌐 HTTP Download Server running on http://0.0.0.0:{SERVER_PORT}")
 
 async def post_init(application):
+    global GLOBAL_BOT
+    GLOBAL_BOT = application.bot
     await start_web_server()
     try:
         commands = [
@@ -2439,6 +2772,9 @@ def main():
         .post_init(post_init)
         .build()
     )
+
+    global GLOBAL_BOT
+    GLOBAL_BOT = application.bot
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
