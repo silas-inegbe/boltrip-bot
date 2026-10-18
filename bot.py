@@ -113,7 +113,9 @@ def get_local_ip():
 
 LOCAL_IP = get_local_ip()
 SERVER_PORT = int(os.environ.get('PORT', '8080'))
-BASE_URL = os.environ.get('BASE_URL') or f'http://{LOCAL_IP}:{SERVER_PORT}'
+BASE_URL = os.environ.get('BASE_URL') or os.environ.get('RENDER_EXTERNAL_URL') or f'http://{LOCAL_IP}:{SERVER_PORT}'
+if BASE_URL.startswith("http://") and ".onrender.com" in BASE_URL:
+    BASE_URL = BASE_URL.replace("http://", "https://", 1)
 
 logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -788,20 +790,578 @@ def download_pinterest_direct(url, cache_id, progress_hook=None, direct_media_ur
     return None
 
 
+def render_expired_page():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Link Expired — Boltrip</title>
+  <style>
+    :root {
+      --bg: #f2f2f7;
+      --card-bg: #ffffff;
+      --card-border: rgba(0, 0, 0, 0.08);
+      --label: #000000;
+      --secondary-label: #8e8e93;
+      --accent: #007aff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #000000;
+        --card-bg: #1c1c1e;
+        --card-border: rgba(255, 255, 255, 0.1);
+        --label: #ffffff;
+        --secondary-label: #8e8e93;
+        --accent: #0a84ff;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--label);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+    }
+    .card {
+      background: var(--card-bg);
+      border-radius: 20px;
+      border: 1px solid var(--card-border);
+      padding: 32px 24px;
+      max-width: 420px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+    }
+    .icon { font-size: 48px; }
+    h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+    p { font-size: 15px; color: var(--secondary-label); line-height: 1.4; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 16px;
+      font-weight: 600;
+      text-decoration: none;
+      padding: 14px 24px;
+      border-radius: 12px;
+      width: 100%;
+      min-height: 48px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">⏳</div>
+    <h1>Download Link Expired</h1>
+    <p>This temporary download link is no longer available on the server. Please generate a fresh download from @Boltrip_bot.</p>
+    <a href="https://t.me/Boltrip_bot" class="btn">🤖 Open @Boltrip_bot</a>
+  </div>
+</body>
+</html>
+"""
+
+def render_download_page(file_id, filename, file_size_mb, is_video=True, is_audio=False, title="", author="", width=None, height=None, duration=0):
+    raw_url = f"/download/{file_id}?raw=1"
+    stream_url = f"/download/{file_id}?stream=1"
+    display_title = title if title else filename
+    import html as html_mod
+    clean_title = html_mod.escape(display_title)
+    clean_author = html_mod.escape(author) if author else ""
+    safe_download_name = html_mod.escape(filename)
+
+    res_badge = ""
+    if height:
+        if height >= 2160:
+            res_badge = "4K Ultra HD"
+        elif height >= 1440:
+            res_badge = "2K Quad HD"
+        elif height >= 1080:
+            res_badge = "1080p Full HD"
+        elif height >= 720:
+            res_badge = "720p HD"
+        else:
+            res_badge = f"{height}p"
+    elif is_video:
+        res_badge = "HD Video"
+    elif is_audio:
+        res_badge = "MP3 Audio"
+
+    dur_str = ""
+    if duration > 0:
+        mins = int(duration) // 60
+        secs = int(duration) % 60
+        dur_str = f"{mins}:{secs:02d}"
+
+    media_player_html = ""
+    if is_video:
+        media_player_html = f'<video controls playsinline webkit-playsinline preload="metadata"><source src="{stream_url}" type="video/mp4">Your browser does not support HTML5 video.</video>'
+    elif is_audio:
+        media_player_html = f'<audio controls preload="metadata"><source src="{stream_url}" type="audio/mpeg">Your browser does not support audio.</audio>'
+
+    author_html = f'<div class="author">By {clean_author}</div>' if clean_author else ''
+    badge_html = f'<span class="badge">{res_badge}</span>' if res_badge else ''
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>{clean_title} — Boltrip</title>
+  <style>
+    :root {{
+      --bg: #f2f2f7;
+      --card-bg: #ffffff;
+      --card-border: rgba(0, 0, 0, 0.08);
+      --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+      --label: #000000;
+      --secondary-label: #8e8e93;
+      --separator: rgba(60, 60, 67, 0.12);
+      --accent: #007aff;
+      --accent-hover: #0062cc;
+      --accent-tint: rgba(0, 122, 255, 0.1);
+      --tip-bg: rgba(0, 122, 255, 0.06);
+      --tip-border: rgba(0, 122, 255, 0.2);
+      --tip-text: #0056b3;
+      --badge-bg: rgba(0, 0, 0, 0.06);
+      --badge-text: #3c3c43;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg: #000000;
+        --card-bg: #1c1c1e;
+        --card-border: rgba(255, 255, 255, 0.1);
+        --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+        --label: #ffffff;
+        --secondary-label: #8e8e93;
+        --separator: rgba(84, 84, 88, 0.36);
+        --accent: #0a84ff;
+        --accent-hover: #409cff;
+        --accent-tint: rgba(10, 132, 255, 0.18);
+        --tip-bg: rgba(10, 132, 255, 0.12);
+        --tip-border: rgba(10, 132, 255, 0.28);
+        --tip-text: #82b9f9;
+        --badge-bg: rgba(255, 255, 255, 0.12);
+        --badge-text: #ebebf5;
+      }}
+    }}
+    * {{
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--label);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: max(20px, env(safe-area-inset-top)) 16px max(32px, env(safe-area-inset-bottom)) 16px;
+      -webkit-font-smoothing: antialiased;
+    }}
+    .container {{
+      width: 100%;
+      max-width: 520px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }}
+    .header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 4px 8px 4px;
+    }}
+    .brand {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }}
+    .brand-bolt {{
+      font-size: 20px;
+    }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      background: var(--badge-bg);
+      color: var(--badge-text);
+      text-transform: uppercase;
+    }}
+    .media-card {{
+      background: var(--card-bg);
+      border-radius: 20px;
+      border: 1px solid var(--card-border);
+      box-shadow: var(--card-shadow);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }}
+    .media-player-wrapper {{
+      width: 100%;
+      background: #000000;
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 220px;
+    }}
+    video {{
+      width: 100%;
+      max-height: 65vh;
+      display: block;
+      background: #000000;
+    }}
+    audio {{
+      width: 100%;
+      padding: 24px 16px;
+    }}
+    .meta-content {{
+      padding: 18px 20px 20px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .title {{
+      font-size: 19px;
+      font-weight: 700;
+      line-height: 1.25;
+      letter-spacing: -0.025em;
+      word-break: break-word;
+    }}
+    .author {{
+      font-size: 14px;
+      color: var(--secondary-label);
+      font-weight: 500;
+    }}
+    .info-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding-top: 6px;
+      border-top: 1px solid var(--separator);
+      margin-top: 4px;
+    }}
+    .info-item {{
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }}
+    .info-label {{
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 600;
+      color: var(--secondary-label);
+      letter-spacing: 0.03em;
+    }}
+    .info-value {{
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }}
+    .actions-card {{
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .btn {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 50px;
+      border-radius: 14px;
+      font-size: 17px;
+      font-weight: 600;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      transition: transform 0.1s ease, opacity 0.15s ease;
+      letter-spacing: -0.015em;
+    }}
+    .btn:active {{
+      transform: scale(0.98);
+      opacity: 0.85;
+    }}
+    .btn-primary {{
+      background: var(--accent);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(0, 122, 255, 0.35);
+    }}
+    .btn-secondary {{
+      background: var(--card-bg);
+      color: var(--accent);
+      border: 1px solid var(--card-border);
+      font-size: 15px;
+      min-height: 46px;
+    }}
+    .tip-card {{
+      background: var(--tip-bg);
+      border: 1px solid var(--tip-border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--tip-text);
+    }}
+    .tip-title {{
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+    }}
+    .toast {{
+      position: fixed;
+      bottom: max(24px, env(safe-area-inset-bottom));
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: rgba(30, 30, 30, 0.95);
+      color: #ffffff;
+      padding: 10px 20px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      transition: transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      z-index: 999;
+      pointer-events: none;
+    }}
+    .toast.show {{
+      transform: translateX(-50%) translateY(0);
+    }}
+    .footer-note {{
+      text-align: center;
+      font-size: 12px;
+      color: var(--secondary-label);
+      margin-top: 8px;
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="brand">
+        <span class="brand-bolt">⚡</span> Boltrip
+      </div>
+      {badge_html}
+    </div>
+
+    <div class="media-card">
+      <div class="media-player-wrapper">
+        {media_player_html}
+      </div>
+      <div class="meta-content">
+        <div class="title">{clean_title}</div>
+        {author_html}
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">File Size</span>
+            <span class="info-value">{file_size_mb:.1f} MB</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Quality</span>
+            <span class="info-value">{res_badge if res_badge else ("Video" if is_video else "Audio")}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Length</span>
+            <span class="info-value">{dur_str if dur_str else "Original"}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions-card">
+      <a href="{raw_url}" download="{safe_download_name}" class="btn btn-primary" id="downloadBtn">
+        📥 Save / Download File
+      </a>
+      <button class="btn btn-secondary" onclick="copyDirectLink()">
+        📋 Copy Direct Download Link
+      </button>
+    </div>
+
+    <div class="tip-card" id="telegramTip">
+      <div class="tip-title">📱 Mobile Instructions</div>
+      <div id="tipBody">
+        • <b>Instant Play:</b> Tap the video above to stream in Full HD right inside this window.<br>
+        • <b>iPhone / Safari:</b> Tap the fullscreen button, tap <b>Share (⬆️)</b> ➔ <b>Save Video</b> to save to Camera Roll.<br>
+        • <b>Android / Chrome:</b> Tap <b>Save / Download File</b> above to download straight to your storage.
+      </div>
+    </div>
+
+    <div class="footer-note">
+      Downloaded with @Boltrip_bot • Zero ads • High speed
+    </div>
+  </div>
+
+  <div class="toast" id="toast">Link copied to clipboard!</div>
+
+  <script>
+    const isTelegram = navigator.userAgent.includes('Telegram') || navigator.userAgent.includes('TG');
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+    if (isTelegram) {{
+      const tipBody = document.getElementById('tipBody');
+      if (isIOS) {{
+        tipBody.innerHTML = '<b>Inside Telegram on iPhone:</b><br>' +
+          '1. To save to Camera Roll: Tap play, tap <b>Share (⬆️)</b> ➔ <b>Save Video</b>.<br>' +
+          '2. Or tap <b>•••</b> at top-right ➔ <b>Open in Safari</b> to download to Files.';
+      }} else {{
+        tipBody.innerHTML = '<b>Inside Telegram on Android:</b><br>' +
+          'Tap <b>⋮</b> at top-right and select <b>Open in Chrome / Browser</b> to start download directly.';
+      }}
+    }}
+
+    function copyDirectLink() {{
+      const fullUrl = window.location.origin + '{raw_url}';
+      navigator.clipboard.writeText(fullUrl).then(() => {{
+        showToast('Direct download link copied!');
+      }}).catch(() => {{
+        const input = document.createElement('input');
+        input.value = fullUrl;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        document.body.removeChild(input);
+        showToast('Direct download link copied!');
+      }});
+    }}
+
+    function showToast(msg) {{
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2400);
+    }}
+  </script>
+</body>
+</html>
+"""
+
+def prune_expired_downloads():
+    try:
+        now = time.time()
+        for f in glob.glob(os.path.join(DOWNLOAD_DIR, "*")):
+            if os.path.isfile(f) and not f.endswith(".part"):
+                if now - os.path.getmtime(f) > 7200:  # 2 hours
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
 async def handle_direct_download(request):
+    prune_expired_downloads()
     file_id = request.match_info.get("file_id")
     matching = glob.glob(os.path.join(DOWNLOAD_DIR, f"*{file_id}*"))
     matching = [m for m in matching if not m.endswith(".part") and os.path.isfile(m)]
     if not matching:
+        accept = request.headers.get("Accept", "")
+        if "text/html" in accept:
+            return web.Response(text=render_expired_page(), content_type="text/html", status=404)
         return web.Response(text="Download expired or not found. Please request from @Boltrip_bot again.", status=404)
 
     file_path = matching[0]
     filename = os.path.basename(file_path)
-    size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    logger.info(f"🌐 [PHONE DOWNLOAD] Client downloaded '{filename}' ({size_mb:.1f} MB)")
-    return web.FileResponse(file_path, headers={
-        "Content-Disposition": f'attachment; filename="{filename}"'
-    })
+    size_bytes = os.path.getsize(file_path)
+    size_mb = size_bytes / (1024 * 1024)
+
+    ext = os.path.splitext(filename)[1].lower()
+    is_video = ext in ['.mp4', '.mkv', '.webm', '.mov', '.avi']
+    is_audio = ext in ['.mp3', '.m4a', '.ogg', '.opus', '.wav', '.flac']
+    is_image = ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']
+
+    if is_video:
+        content_type = "video/mp4" if ext == ".mp4" else f"video/{ext.lstrip('.')}"
+    elif is_audio:
+        content_type = "audio/mpeg" if ext == ".mp3" else ("audio/mp4" if ext == ".m4a" else f"audio/{ext.lstrip('.')}")
+    elif is_image:
+        content_type = "image/jpeg" if ext in ['.jpg', '.jpeg'] else f"image/{ext.lstrip('.')}"
+    else:
+        content_type = "application/octet-stream"
+
+    safe_ascii = re.sub(r'[^\w\.-]', '_', filename)
+    if not safe_ascii:
+        safe_ascii = f"boltrip_media{ext}"
+    encoded_filename = urllib.parse.quote(filename)
+
+    raw_param = request.query.get("raw") == "1"
+    user_agent = request.headers.get("User-Agent", "")
+    is_cli = any(tool in user_agent.lower() for tool in ["curl", "wget", "aria2"])
+
+    if raw_param or is_cli:
+        logger.info(f"🌐 [PHONE DOWNLOAD RAW] Client downloaded '{filename}' ({size_mb:.1f} MB)")
+        headers = {
+            "Content-Type": content_type,
+            "Content-Disposition": f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{encoded_filename}',
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(size_bytes),
+            "Cache-Control": "public, max-age=3600",
+        }
+        return web.FileResponse(file_path, headers=headers)
+
+    stream_param = request.query.get("stream") == "1"
+    if stream_param:
+        headers = {
+            "Content-Type": content_type,
+            "Content-Disposition": f'inline; filename="{safe_ascii}"; filename*=UTF-8\'\'{encoded_filename}',
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+        }
+        return web.FileResponse(file_path, headers=headers)
+
+    cached_info = MEDIA_CACHE.get(file_id, {})
+    meta = probe_video_metadata(file_path) if is_video else {}
+    title = cached_info.get("title") or filename
+    author = cached_info.get("author") or ""
+    width = meta.get("width")
+    height = meta.get("height")
+    duration = meta.get("duration", 0)
+
+    html_content = render_download_page(
+        file_id=file_id,
+        filename=filename,
+        file_size_mb=size_mb,
+        is_video=is_video,
+        is_audio=is_audio,
+        title=title,
+        author=author,
+        width=width,
+        height=height,
+        duration=duration
+    )
+    return web.Response(text=html_content, content_type="text/html")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name if update.effective_user else "there"
@@ -1448,10 +2008,10 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "retries": 10,
                 "concurrent_fragment_downloads": 1 if is_yt else 8,
                 "buffersize": 1024 * 128,
-                "js_runtimes": {"deno": {}, "node": {}},
+                "js_runtimes": {"node": {}, "deno": {}},
                 "extractor_args": {
                     "twitter": {"api": ["syndication"]},
-                    "youtube": {"player_client": ["ios", "android", "web"]} if is_yt else {}
+                    "youtube": {"player_client": ["web_embedded", "web", "default"]} if is_yt else {}
                 },
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
@@ -1461,17 +2021,17 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             }
         else:
             if quality == "720":
-                fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best[ext=mp4]/best"
+                fmt = "bestvideo[height<=720]+bestaudio/bestvideo[height<=720]+bestaudio[ext=m4a]/best[height<=720]/best"
             elif quality == "4k":
-                fmt = "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best[ext=mp4]/best"
+                fmt = "bestvideo[height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio[ext=m4a]/best[height<=2160]/best"
             elif quality == "1080":
-                fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best[ext=mp4]/best"
+                fmt = "bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio[ext=m4a]/best[height<=1080]/best"
             else:
-                fmt = "bestvideo+bestaudio/best[ext=mp4]/best"
+                fmt = "bestvideo+bestaudio/bestvideo+bestaudio[ext=m4a]/best"
             
             ydl_opts = {
                 "format": fmt,
-                "format_sort": ["vcodec:h264", "res", "ext:mp4:m4a", "hasaud"],
+                "format_sort": ["res", "vcodec:h264", "ext:mp4:m4a"],
                 "outtmpl": outtmpl,
                 "progress_hooks": [progress_hook],
                 "quiet": True,
@@ -1485,10 +2045,10 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     "Merger": ["-movflags", "+faststart"],
                     "FFmpegVideoRemuxer": ["-movflags", "+faststart"],
                 },
-                "js_runtimes": {"deno": {}, "node": {}},
+                "js_runtimes": {"node": {}, "deno": {}},
                 "extractor_args": {
                     "twitter": {"api": ["syndication"]},
-                    "youtube": {"player_client": ["ios", "android", "web"]} if is_yt else {}
+                    "youtube": {"player_client": ["web_embedded", "web", "default"]} if is_yt else {}
                 },
             }
         if FFMPEG_PATH:
@@ -1525,15 +2085,15 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                     logger.warning(f"Primary yt-dlp download failed on {url}: {first_err}")
                     
                     if is_yt:
-                        # Fallback 1: Unauthenticated Android & TV Downgraded client (bypasses browser bot check)
-                        logger.warning(f"Retrying YouTube {url} with Android / TV Downgraded client...")
+                        # Fallback 1: Web Embedded & Web Safari without cookies (bypasses cookie session challenge while keeping Full HD)
+                        logger.warning(f"Retrying YouTube {url} with Web Embedded / Safari client...")
                         fb1_opts = dict(ydl_opts)
                         fb1_opts.pop("cookiefile", None)
                         fb1_opts["extractor_args"] = {
-                            "youtube": {"player_client": ["android", "tv_downgraded"]}
+                            "youtube": {"player_client": ["web_embedded", "web_safari"]}
                         }
                         if not is_audio:
-                            fb1_opts["format"] = "best[ext=mp4]/bestvideo+bestaudio/best"
+                            fb1_opts["format"] = fmt
                         fb1_opts["concurrent_fragment_downloads"] = 1
                         try:
                             with yt_dlp.YoutubeDL(fb1_opts) as ydl_fb1:
@@ -1547,17 +2107,17 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                                         fname = base + ".mp4"
                                 return fname, info
                         except Exception as fb1_err:
-                            logger.warning(f"Fallback 1 (Android/TV) failed: {fb1_err}")
+                            logger.warning(f"Fallback 1 (Web Embedded/Safari) failed: {fb1_err}")
 
-                        # Fallback 2: iOS HLS & progressive direct streams (bypasses GVS SABR chunk 403 blocks)
-                        logger.warning(f"Retrying YouTube {url} with iOS HLS client...")
+                        # Fallback 2: mweb / iOS client preserving requested quality
+                        logger.warning(f"Retrying YouTube {url} with mweb / iOS client...")
                         fb2_opts = dict(ydl_opts)
                         fb2_opts.pop("cookiefile", None)
                         fb2_opts["extractor_args"] = {
-                            "youtube": {"player_client": ["ios", "mweb"]}
+                            "youtube": {"player_client": ["mweb", "ios"]}
                         }
                         if not is_audio:
-                            fb2_opts["format"] = "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best"
+                            fb2_opts["format"] = fmt
                         fb2_opts["concurrent_fragment_downloads"] = 1
                         try:
                             with yt_dlp.YoutubeDL(fb2_opts) as ydl_fb2:
@@ -1571,17 +2131,17 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                                         fname = base + ".mp4"
                                 return fname, info
                         except Exception as fb2_err:
-                            logger.warning(f"Fallback 2 (iOS HLS) failed: {fb2_err}")
+                            logger.warning(f"Fallback 2 (mweb/iOS) failed: {fb2_err}")
 
-                        # Fallback 3: Web Embedded client
-                        logger.warning(f"Retrying YouTube {url} with Web Embedded client...")
+                        # Fallback 3: Android & TV Downgraded client (absolute last-resort fallback)
+                        logger.warning(f"Retrying YouTube {url} with Android / TV Downgraded client...")
                         fb3_opts = dict(ydl_opts)
                         fb3_opts.pop("cookiefile", None)
                         fb3_opts["extractor_args"] = {
-                            "youtube": {"player_client": ["web_embedded"]}
+                            "youtube": {"player_client": ["android", "tv_downgraded"]}
                         }
                         if not is_audio:
-                            fb3_opts["format"] = "best[ext=mp4]/best"
+                            fb3_opts["format"] = "best[ext=mp4]/bestvideo+bestaudio/best"
                         fb3_opts["concurrent_fragment_downloads"] = 1
                         try:
                             with yt_dlp.YoutubeDL(fb3_opts) as ydl_fb3:
@@ -1595,7 +2155,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                                         fname = base + ".mp4"
                                 return fname, info
                         except Exception as fb3_err:
-                            logger.warning(f"Fallback 3 (Web Embedded) failed: {fb3_err}")
+                            logger.warning(f"Fallback 3 (Android/TV) failed: {fb3_err}")
 
                     raise first_err
 
