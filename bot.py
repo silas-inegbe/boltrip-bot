@@ -128,7 +128,49 @@ URL_REGEX = re.compile(r'(https?://[^\s]+)')
 
 ACTIVE_TASKS = {}
 ACTIVE_SUBPROCESSES = {}
+WAITING_FOR_CLIP = {}
 GLOBAL_BOT = None
+
+def parse_time_to_seconds(time_str: str) -> float | None:
+    time_str = time_str.strip().lower()
+    m_sec = re.fullmatch(r'(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?', time_str)
+    if m_sec:
+        return float(m_sec.group(1))
+    if re.fullmatch(r'\d+(?:\.\d+)?', time_str):
+        return float(time_str)
+    parts = time_str.split(':')
+    if len(parts) == 2:
+        try:
+            return float(parts[0]) * 60 + float(parts[1])
+        except ValueError:
+            return None
+    elif len(parts) == 3:
+        try:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except ValueError:
+            return None
+    return None
+
+def parse_clip_range(text: str) -> tuple[float, float] | None:
+    cleaned = text.replace('–', '-').replace('—', '-')
+    patterns = [r'\s*-\s*', r'\s+to\s+', r'\s+until\s+', r'\s*,\s*', r'\s+']
+    for pat in patterns:
+        splits = re.split(pat, cleaned.strip(), maxsplit=1)
+        if len(splits) == 2:
+            s_val = parse_time_to_seconds(splits[0])
+            e_val = parse_time_to_seconds(splits[1])
+            if s_val is not None and e_val is not None and e_val > s_val:
+                return (s_val, e_val)
+    return None
+
+def format_seconds_to_time(seconds: float) -> str:
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 class ProgressFileReader:
     def __init__(self, filename, cache_id=None, callback=None):
@@ -415,7 +457,10 @@ def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
     elif platform == 'twitter':
         buttons = [
             [InlineKeyboardButton("🎬 Download Video (Original)", callback_data=f"vidbest:{cache_id}")],
-            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
+            [
+                InlineKeyboardButton("✂️ Clip / Trim Video", callback_data=f"clip:{cache_id}"),
+                InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}"),
+            ],
             [get_cancel_button(cache_id, "❌ Cancel")]
         ]
     elif platform == 'threads':
@@ -459,6 +504,7 @@ def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
                 InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
             ],
+            [InlineKeyboardButton("✂️ Clip / Trim Video", callback_data=f"clip:{cache_id}")],
             [get_cancel_button(cache_id, "❌ Cancel")]
         ]
     else:
@@ -468,9 +514,10 @@ def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📱 720p Fast", callback_data=f"vid720:{cache_id}"),
             ],
             [
+                InlineKeyboardButton("✂️ Clip / Trim Video", callback_data=f"clip:{cache_id}"),
                 InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"aud:{cache_id}"),
-                get_cancel_button(cache_id, "❌ Cancel"),
-            ]
+            ],
+            [get_cancel_button(cache_id, "❌ Cancel")]
         ]
     return InlineKeyboardMarkup(buttons)
 
@@ -504,6 +551,7 @@ SUPPORT_POPUP_TEXT = (
     "• <b>Accepted Assets:</b> USDT (TON) or TON (Toncoin)\n"
     "• <b>Wallet Address:</b> <i>(Tap address below to copy)</i>\n"
     f"<code>{TON_WALLET}</code>\n\n"
+    "👨‍💻 <b>Developer Contact:</b> @silas_inegbe\n\n"
     "<i>Thank you so much for keeping free tools alive! ❤️</i>"
 )
 
@@ -511,6 +559,7 @@ def get_support_keyboard():
     ton_url = f"ton://transfer/{TON_WALLET}?text=BoltripSupport"
     buttons = [
         [InlineKeyboardButton("🪙 Pay via Telegram / TON Wallet", url=ton_url)],
+        [InlineKeyboardButton("👨‍💻 Contact Developer (@silas_inegbe)", url="https://t.me/silas_inegbe")],
         [InlineKeyboardButton("📢 Share Boltrip with Friends", switch_inline_query="Check out @Boltrip_bot for fast, ad-free video downloads! ⚡")]
     ]
     return InlineKeyboardMarkup(buttons)
@@ -1469,7 +1518,8 @@ def render_download_page(file_id, filename, file_size_mb, is_video=True, is_audi
     </div>
 
     <div class="footer-note">
-      Downloaded with @Boltrip_bot • Zero ads • High speed
+      Downloaded with @Boltrip_bot • Zero ads • High speed<br>
+      Developed by <a href="https://t.me/silas_inegbe" style="color: inherit; text-decoration: underline;">@silas_inegbe</a>
     </div>
   </div>
 
@@ -1686,10 +1736,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• X / Twitter\n"
         "• Pinterest\n"
         "• Facebook & Reddit\n\n"
+        "**Developer Contact:**\n"
+        "• Contact [@silas_inegbe](https://t.me/silas_inegbe) for inquiries, feedback, or support.\n\n"
         "**How to Use:**\n"
         "1. Paste any media link into this chat.\n"
         "2. Choose your format: 1080p Full HD, 720p, or MP3 Audio.\n"
-        "3. Track live download and upload progress.\n\n"
+        "3. Or tap **[✂️ Clip / Trim Video]** to download only a specific section!\n"
+        "4. Track live download and upload progress.\n\n"
         "**Group Chats:**\n"
         "Add Boltrip to any group and use `/dl <link>`, `/video <link>`, or `/audio <link>`.\n\n"
         "Send a link to begin."
@@ -1709,17 +1762,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**Bot Commands:**\n"
         "• `/start` ➔ Welcome message & feature overview\n"
         "• `/help` ➔ This command guide\n"
+        "• `/clip <url> [start] - [end]` ➔ Clip/trim video portion\n"
+        "• `/contact` ➔ Contact developer (@silas_inegbe)\n"
         "• `/support` or `/donate` ➔ Help us keep servers free & ad-free\n"
         "• `/cancel` ➔ Abort ongoing download or upload\n\n"
         "**Features:**\n"
+        "• ✂️ Video section trimming (YouTube, Twitter, Facebook, etc.)\n"
         "• ❌ 1-Tap Cancel on every step\n"
         "• 📊 Real-time progress bars & download speed\n"
         "• 📱 Direct phone browser download for large files (>50 MB)\n"
-        "• 🗜️ In-chat smart compressor"
+        "• 🗜️ In-chat smart compressor\n\n"
+        "👨‍💻 **Developer:** [@silas_inegbe](https://t.me/silas_inegbe)"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id and user_id in WAITING_FOR_CLIP:
+        WAITING_FOR_CLIP.pop(user_id, None)
     count = len(ACTIVE_TASKS)
     for cid in list(ACTIVE_TASKS.keys()):
         await cancel_task_and_cleanup(cid)
@@ -1730,6 +1790,111 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     ACTIVE_SUBPROCESSES.clear()
     await update.message.reply_text(f"🛑 Cancelled all active operations ({count} stopped).", parse_mode="Markdown")
+
+async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else None
+    text = (update.message.text or "").strip()
+    args = text.split()[1:]
+    if not args:
+        disclaimer_msg = (
+            "✂️ **Video Section Clipper / Trimmer**\n\n"
+            "⚠️ **Supported Platforms Disclaimer:**\n"
+            "Selective section streaming works on:\n"
+            "• **YouTube** (e.g. 1–3+ hour podcasts, live streams, tutorials)\n"
+            "• **Twitch & Kick**\n"
+            "• **X / Twitter**\n"
+            "• **Facebook & Reddit**\n\n"
+            "❌ **Not supported for section streaming:**\n"
+            "• **TikTok, Instagram Reels, Threads, Pinterest**\n"
+            "*(Micro-videos [<60s] do not support selective streaming)*\n\n"
+            "📖 **How to Use:**\n"
+            "1. Simply paste your video link in chat and tap **[✂️ Clip / Trim Video]**\n"
+            "2. OR run command:\n"
+            "   `/clip <url> 01:30 - 03:00`"
+        )
+        await update.message.reply_text(disclaimer_msg, parse_mode="Markdown")
+        return
+
+    first_arg = args[0]
+    url = extract_url(first_arg) or extract_url(text)
+    if not url:
+        await update.message.reply_text(
+            "⚠️ No valid video URL found in your command.\n\n"
+            "**Example:** `/clip https://youtu.be/xxx 01:20 - 02:45`",
+            parse_mode="Markdown"
+        )
+        return
+
+    platform = get_platform_info(url)
+    if platform in ['tiktok', 'instagram', 'threads', 'pinterest']:
+        await update.message.reply_text(
+            f"⚠️ **Clipping is not supported on {platform.title()}**\n\n"
+            f"TikTok, Instagram Reels, Threads, and Pinterest videos are already short mobile clips (<60s) and do not support section streaming.\n\n"
+            f"Clipping works on: **YouTube, Twitch, X/Twitter, Facebook, and Reddit**.",
+            parse_mode="Markdown"
+        )
+        return
+
+    rest_text = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+    rest_text = rest_text.replace(url, "").strip()
+
+    clip_range = parse_clip_range(rest_text) if rest_text else None
+    if clip_range:
+        start_sec, end_sec = clip_range
+        clip_dur = end_sec - start_sec
+        if clip_dur > 900:
+            await update.message.reply_text(
+                f"⚠️ **Clip duration is too long ({int(clip_dur // 60)} minutes).**\n"
+                f"Maximum allowed clip length is **15 minutes**.\n"
+                f"Please specify a shorter range (e.g. `01:00 - 05:00`).",
+                parse_mode="Markdown"
+            )
+            return
+
+        cache_id = str(abs(hash(url)) % 10000000)
+        start_str = format_seconds_to_time(start_sec)
+        end_str = format_seconds_to_time(end_sec)
+        dur_str = format_seconds_to_time(clip_dur)
+
+        status_msg = await update.message.reply_text(
+            f"✂️ **Clipping Video: {start_str} - {end_str}** (`{dur_str}`)\n"
+            f"🔗 `{url[:45]}`\n\n"
+            f"⏳ Initializing fast segment download...",
+            reply_markup=get_cancel_keyboard(cache_id),
+            parse_mode="Markdown"
+        )
+
+        MEDIA_CACHE[cache_id] = {
+            "url": url,
+            "title": f"Clip ({start_str} - {end_str})",
+            "author": "Video Clip",
+            "platform": platform,
+            "has_video": True
+        }
+        save_cache(MEDIA_CACHE)
+
+        t = asyncio.create_task(
+            download_and_send(
+                update, context, status_msg, cache_id, quality="1080", clip_range=(start_sec, end_sec)
+            )
+        )
+        ACTIVE_TASKS[cache_id] = t
+        return
+    else:
+        await process_url(update, context, url)
+
+async def contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact_text = (
+        "👨‍💻 **Developer Contact & Support**\n\n"
+        "Have a question, feedback, bug report, or feature request?\n\n"
+        "💬 **Telegram:** [@silas_inegbe](https://t.me/silas_inegbe)\n\n"
+        "Feel free to send a direct message anytime!"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Message Developer (@silas_inegbe)", url="https://t.me/silas_inegbe")],
+        [InlineKeyboardButton("💖 Support Boltrip", callback_data="show_support")]
+    ])
+    await update.message.reply_text(contact_text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -1933,10 +2098,12 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     title = meta.get("title", "Media")
     author = meta.get("author", "Creator")
     logger.info(f"🔍 [METADATA] Extracted: '{title[:45]}' | Creator: '{author}' (target_url: {target_url})")
+    platform = get_platform_info(target_url)
     MEDIA_CACHE[cache_id] = {
         "url": target_url,
         "title": title,
         "author": author,
+        "platform": platform,
         "is_pinterest": meta.get("is_pinterest", False),
         "is_threads": meta.get("is_threads", False),
         "media_url": meta.get("media_url"),
@@ -1954,7 +2121,6 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         ACTIVE_TASKS[cache_id] = t
         return
 
-    platform = get_platform_info(target_url)
     reply_markup = get_quality_keyboard(cache_id, platform)
 
     await status_msg.edit_text(
@@ -1965,6 +2131,69 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
 async def handle_incoming_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
+    user = update.effective_user
+    user_id = user.id if user else None
+
+    # Check if this user is waiting to send a clip timestamp range
+    if user_id and user_id in WAITING_FOR_CLIP:
+        # Check if user sent a new URL instead
+        new_url = extract_url(text)
+        if new_url and not any(text.startswith(cmd) for cmd in ["/clip", "/trim"]):
+            # Abandon clipping and process new URL
+            WAITING_FOR_CLIP.pop(user_id, None)
+        else:
+            clip_range = parse_clip_range(text)
+            if clip_range:
+                start_sec, end_sec = clip_range
+                clip_dur = end_sec - start_sec
+                if clip_dur > 900:  # 15 minutes limit
+                    await update.message.reply_text(
+                        f"⚠️ **Clip duration is too long ({int(clip_dur // 60)} minutes).**\n"
+                        f"Maximum allowed clip length is **15 minutes**.\n"
+                        f"Please reply with a shorter range (e.g. `01:00 - 05:00`).",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                clip_state = WAITING_FOR_CLIP.pop(user_id, None)
+                cache_id = clip_state["cache_id"]
+                cached = MEDIA_CACHE.get(cache_id)
+                if not cached:
+                    await update.message.reply_text("⚠️ Download session expired. Please paste the link again.")
+                    return
+
+                start_str = format_seconds_to_time(start_sec)
+                end_str = format_seconds_to_time(end_sec)
+                dur_str = format_seconds_to_time(clip_dur)
+                v_title = cached.get("title", "Media")
+
+                status_msg = await update.message.reply_text(
+                    f"✂️ **Clipping Video: {start_str} - {end_str}** (`{dur_str}`)\n"
+                    f"`{v_title[:45]}`\n\n"
+                    f"⏳ Initializing fast segment download...",
+                    reply_markup=get_cancel_keyboard(cache_id),
+                    parse_mode="Markdown"
+                )
+
+                t = asyncio.create_task(
+                    download_and_send(
+                        update, context, status_msg, cache_id, quality="1080", clip_range=(start_sec, end_sec)
+                    )
+                )
+                ACTIVE_TASKS[cache_id] = t
+                return
+            else:
+                await update.message.reply_text(
+                    "⚠️ **Unrecognized timestamp format.**\n\n"
+                    "Please reply with start and end times, e.g.:\n"
+                    "• `01:30 - 03:00`\n"
+                    "• `10:00 - 12:30`\n"
+                    "• `90s - 180s`\n\n"
+                    "Or tap /cancel to abort clipping.",
+                    parse_mode="Markdown"
+                )
+                return
+
     url = extract_url(text)
     if not url:
         return
@@ -1997,6 +2226,68 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     title = cached.get("title", "Media")
     author = cached.get("author", "Creator")
+
+    if action == "cancel_clip":
+        user_id = query.from_user.id
+        WAITING_FOR_CLIP.pop(user_id, None)
+        await query.edit_message_text("❌ Clipping cancelled.")
+        return
+
+    if action == "back_formats":
+        user_id = query.from_user.id
+        WAITING_FOR_CLIP.pop(user_id, None)
+        platform = cached.get("platform") or get_platform_info(cached.get("url", ""))
+        await query.edit_message_text(
+            f"🎬 **{title}**\n👤 _{author}_\n\nSelect desired download quality:",
+            reply_markup=get_quality_keyboard(cache_id, platform),
+            parse_mode="Markdown"
+        )
+        return
+
+    if action == "clip":
+        platform = cached.get("platform") or get_platform_info(cached.get("url", ""))
+        unsupported = ["tiktok", "instagram", "threads", "pinterest"]
+        if platform in unsupported:
+            p_name = platform.title()
+            await query.answer(f"Clipping is not supported for {p_name}!", show_alert=True)
+            await query.message.reply_text(
+                f"⚠️ **Clipping Not Supported for {p_name}**\n\n"
+                f"Selective video section clipping works on long-form platforms (**YouTube, Twitch, X/Twitter, Facebook, Reddit**).\n\n"
+                f"{p_name} videos are already short micro-clips (< 60s) and do not support section streaming.\n"
+                f"Please choose a full download format from the options above.",
+                parse_mode="Markdown"
+            )
+            return
+
+        user_id = query.from_user.id
+        WAITING_FOR_CLIP[user_id] = {
+            "cache_id": cache_id,
+            "status_msg_id": query.message.message_id,
+            "chat_id": query.message.chat_id,
+            "created_at": time.time(),
+        }
+        clip_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back to Formats", callback_data=f"back_formats:{cache_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_clip:{cache_id}")]
+        ])
+        await query.edit_message_text(
+            f"✂️ **Clip / Trim Video Section**\n"
+            f"`{title[:50]}`\n\n"
+            f"⚠️ **Supported Platforms Disclaimer:**\n"
+            f"• **Supported:** YouTube, Twitch, X / Twitter, Facebook, Reddit\n"
+            f"• **Not Supported:** TikTok, Instagram, Threads, Pinterest _(micro-videos do not support selective section streaming)_\n\n"
+            f"⏱️ **How to Clip:**\n"
+            f"Reply with the **start** and **end** timestamp of the part you want to download:\n\n"
+            f"**Examples:**\n"
+            f"• `01:30 - 03:00` (from 1m 30s to 3m 00s)\n"
+            f"• `15:00 - 18:30`\n"
+            f"• `01:05:00 - 01:08:30` (for hour-long videos)\n"
+            f"• `90s - 180s`\n\n"
+            f"_(Maximum clip duration: 15 minutes)_",
+            reply_markup=clip_markup,
+            parse_mode="Markdown"
+        )
+        return
 
     if action == "compress":
         input_path = cached.get("file_path")
@@ -2107,7 +2398,7 @@ async def execute_compression_and_upload(update, context, status_msg, cache_id, 
 
     await deliver_file(update, context, status_msg, cache_id, compressed_path, is_audio=False, title=title, author=author, is_tiktok=is_tiktok)
 
-async def download_and_send(update, context, status_msg, cache_id, quality="1080"):
+async def download_and_send(update, context, status_msg, cache_id, quality="1080", clip_range=None):
     cached = MEDIA_CACHE.get(cache_id)
     if not cached:
         await status_msg.edit_text("⚠️ Download session expired. Please re-send the link.")
@@ -2127,10 +2418,15 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
     save_cache(MEDIA_CACHE)
 
     # --- 1. INSTANT TELEGRAM FILE_ID CACHE CHECK ---
-    cache_key = f"{url}_{quality}"
+    if clip_range:
+        s_sec, e_sec = clip_range
+        cache_key = f"{url}_clip_{int(s_sec)}_{int(e_sec)}"
+    else:
+        cache_key = f"{url}_{quality}"
+
     cached_file = FILE_CACHE.get(cache_key)
     if cached_file and cached_file.get("file_id"):
-        logger.info(f"⚡ Instant delivery from Telegram cache for {url}")
+        logger.info(f"⚡ Instant delivery from Telegram cache for {url} ({cache_key})")
         file_id = cached_file["file_id"]
         c_title = cached_file.get("title", title)
         c_author = cached_file.get("author", author)
@@ -2140,9 +2436,18 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
         import html
         t_clean = html.escape(c_title[:100])
         a_clean = html.escape(c_author[:60])
+        clip_tag = ""
+        if clip_range:
+            s_sec, e_sec = clip_range
+            s_str = format_seconds_to_time(s_sec)
+            e_str = format_seconds_to_time(e_sec)
+            dur_str = format_seconds_to_time(e_sec - s_sec)
+            clip_tag = f"✂️ <b>Clip:</b> <code>{s_str} - {e_str}</code> (⏱️ {dur_str})\n"
+
         caption = (
             f"🎬 <b>{t_clean}</b>\n"
             f"👤 <i>{a_clean}</i>\n"
+            f"{clip_tag}"
             f"📦 <code>{c_size:.1f} MB</code>\n\n"
             f"⚡ Instant delivery via @Boltrip_bot"
         )
@@ -2216,12 +2521,13 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
             if in_queue and cache_id in QUEUE_WAITING:
                 QUEUE_WAITING.remove(cache_id)
 
+            mode_display = f"Clip {format_seconds_to_time(clip_range[0])} - {format_seconds_to_time(clip_range[1])}" if clip_range else quality
             await status_msg.edit_text(
-                f"⏳ **Starting download...**\n`{title[:45]}`\n\nQuality: `{quality}`",
+                f"⏳ **Starting download...**\n`{title[:45]}`\n\nMode: `{mode_display}`",
                 reply_markup=cancel_markup,
                 parse_mode="Markdown"
             )
-            await _run_download_workflow(update, context, status_msg, cache_id, quality, url, title, author, is_audio, cancel_markup, main_loop)
+            await _run_download_workflow(update, context, status_msg, cache_id, quality, url, title, author, is_audio, cancel_markup, main_loop, clip_range=clip_range)
     except Exception as e:
         logger.error(f"❌ [WORKFLOW ERROR] {e}", exc_info=True)
         if "Cancelled by user" not in str(e):
@@ -2235,7 +2541,7 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
         ACTIVE_TASKS.pop(cache_id, None)
     return
 
-async def _run_download_workflow(update, context, status_msg, cache_id, quality, url, title, author, is_audio, cancel_markup, main_loop):
+async def _run_download_workflow(update, context, status_msg, cache_id, quality, url, title, author, is_audio, cancel_markup, main_loop, clip_range=None):
 
     last_edit = [0]
     last_text = [""]
@@ -2267,13 +2573,24 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed else "..."
             eta_str = f"{eta}s" if eta else "..."
 
-            text = (
-                f"📥 **Downloading Media...**\n"
-                f"`{title[:40]}`\n\n"
-                f"{bar} **{percent:.1f}%**\n"
-                f"⚡ `{speed_str}` | ⏱️ `{eta_str}`\n"
-                f"📦 `{size_str}`"
-            )
+            if clip_range:
+                s_sec, e_sec = clip_range
+                text = (
+                    f"✂️ **Clipping & Downloading...**\n"
+                    f"`{title[:40]}`\n"
+                    f"⏱️ `{format_seconds_to_time(s_sec)} - {format_seconds_to_time(e_sec)}`\n\n"
+                    f"{bar} **{percent:.1f}%**\n"
+                    f"⚡ `{speed_str}` | ⏱️ `{eta_str}`\n"
+                    f"📦 `{size_str}`"
+                )
+            else:
+                text = (
+                    f"📥 **Downloading Media...**\n"
+                    f"`{title[:40]}`\n\n"
+                    f"{bar} **{percent:.1f}%**\n"
+                    f"⚡ `{speed_str}` | ⏱️ `{eta_str}`\n"
+                    f"📦 `{size_str}`"
+                )
             # Log milestones on server console at ~25%, 50%, 75%, 100%
             pct_int = int(percent)
             if pct_int in [25, 50, 75, 100] and pct_int != getattr(progress_hook, 'last_log_pct', -1):
@@ -2307,7 +2624,7 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
             logger.warning(f"TikWM direct download failed, falling back to yt-dlp: {e}")
             downloaded_path = None
 
-    if is_fb and not downloaded_path:
+    if is_fb and not downloaded_path and not clip_range:
         try:
             loop = asyncio.get_running_loop()
             downloaded_path = await loop.run_in_executor(
@@ -2445,6 +2762,11 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
         if PROXY_URL:
             ydl_opts["proxy"] = PROXY_URL
 
+        if clip_range:
+            start_sec, end_sec = clip_range
+            ydl_opts["download_ranges"] = yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)])
+            ydl_opts["force_keyframes_at_cuts"] = True
+
         loop = asyncio.get_running_loop()
         try:
             def run_ydl():
@@ -2546,6 +2868,34 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 matches = [m for m in matches if not m.endswith(".part")]
                 if matches:
                     downloaded_path = matches[0]
+
+            # Verify and trim if duration exceeds requested range
+            if clip_range and downloaded_path and os.path.exists(downloaded_path) and FFMPEG_PATH:
+                start_sec, end_sec = clip_range
+                target_dur = end_sec - start_sec
+                meta = probe_video_metadata(downloaded_path)
+                actual_dur = meta.get("duration", 0)
+                if actual_dur > target_dur + 4.0:
+                    logger.info(f"Trimming with FFmpeg: actual duration {actual_dur}s > target {target_dur}s")
+                    ext = os.path.splitext(downloaded_path)[1] or (".mp3" if is_audio else ".mp4")
+                    trimmed_path = os.path.join(DOWNLOAD_DIR, f"trimmed_{cache_id}_{int(start_sec)}_{int(end_sec)}{ext}")
+                    def do_trim():
+                        trim_cmd = [
+                            FFMPEG_PATH, "-y",
+                            "-ss", str(start_sec),
+                            "-i", downloaded_path,
+                            "-t", str(target_dur),
+                            "-c", "copy",
+                            trimmed_path
+                        ]
+                        return subprocess.run(trim_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    trim_res = await loop.run_in_executor(None, do_trim)
+                    if trim_res.returncode == 0 and os.path.exists(trimmed_path) and os.path.getsize(trimmed_path) > 0:
+                        try:
+                            os.remove(downloaded_path)
+                        except Exception:
+                            pass
+                        downloaded_path = trimmed_path
         except asyncio.CancelledError:
             cleanup_files(cache_id)
             raise
@@ -2595,10 +2945,10 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
 
     await deliver_file(
         update, context, status_msg, cache_id, downloaded_path,
-        is_audio=is_audio, title=title, author=author, is_tiktok=is_tiktok, quality=quality
+        is_audio=is_audio, title=title, author=author, is_tiktok=is_tiktok, quality=quality, clip_range=clip_range
     )
 
-async def deliver_file(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality="1080"):
+async def deliver_file(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality="1080", clip_range=None):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
     if file_size_mb >= 49.5:
@@ -2618,9 +2968,9 @@ async def deliver_file(update, context, status_msg, cache_id, file_path, is_audi
         )
         return
 
-    await upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality=quality)
+    await upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality=quality, clip_range=clip_range)
 
-async def upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality="1080"):
+async def upload_to_telegram(update, context, status_msg, cache_id, file_path, is_audio, title, author, is_tiktok, quality="1080", clip_range=None):
     cancel_markup = get_cancel_keyboard(cache_id)
     main_loop = asyncio.get_running_loop()
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -2658,9 +3008,18 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
     import html
     t_clean = html.escape(title[:100])
     a_clean = html.escape(author[:60])
+    clip_line = ""
+    if clip_range:
+        s_sec, e_sec = clip_range
+        s_str = format_seconds_to_time(s_sec)
+        e_str = format_seconds_to_time(e_sec)
+        dur_str = format_seconds_to_time(e_sec - s_sec)
+        clip_line = f"✂️ <b>Clip:</b> <code>{s_str} - {e_str}</code> (⏱️ {dur_str})\n"
+
     caption = (
         f"🎬 <b>{t_clean}</b>\n"
         f"👤 <i>{a_clean}</i>\n"
+        f"{clip_line}"
         f"📦 <code>{file_size_mb:.1f} MB</code>\n\n"
         f"⚡ Downloaded with @Boltrip_bot"
     )
@@ -2733,7 +3092,12 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
 
             if f_id:
                 cached_info = MEDIA_CACHE.get(cache_id, {})
-                cache_key = f"{cached_info.get('url', '')}_{quality}"
+                c_url = cached_info.get('url', '')
+                if clip_range:
+                    s_sec, e_sec = clip_range
+                    cache_key = f"{c_url}_clip_{int(s_sec)}_{int(e_sec)}"
+                else:
+                    cache_key = f"{c_url}_{quality}"
                 meta = probe_video_metadata(file_path) if (not is_audio and c_type == "video") else {}
                 FILE_CACHE[cache_key] = {
                     "file_id": f_id,
@@ -2807,6 +3171,8 @@ async def post_init(application):
         commands = [
             BotCommand("start", "Welcome & feature overview"),
             BotCommand("help", "Command guide & group usage"),
+            BotCommand("clip", "Clip/trim video by timestamps"),
+            BotCommand("contact", "Contact developer (@silas_inegbe)"),
             BotCommand("support", "Help keep Boltrip 100% free"),
             BotCommand("donate", "Support server & bandwidth costs"),
             BotCommand("cancel", "Abort current download/upload"),
@@ -2838,6 +3204,10 @@ def main():
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("clip", clip_command))
+    application.add_handler(CommandHandler("trim", clip_command))
+    application.add_handler(CommandHandler("contact", contact_command))
+    application.add_handler(CommandHandler("developer", contact_command))
     application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("donate", support_command))
     application.add_handler(CommandHandler("coffee", support_command))
