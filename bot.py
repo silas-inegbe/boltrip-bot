@@ -51,12 +51,28 @@ try:
 except Exception:
     pass
 
-FFMPEG_PATH = None
-try:
-    import imageio_ffmpeg
-    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-except Exception:
-    FFMPEG_PATH = 'ffmpeg'
+import shutil
+
+def get_ffmpeg_binary():
+    # 1. System PATH (installed by apt-get, brew, or in PATH)
+    p = shutil.which('ffmpeg')
+    if p:
+        return p
+    # 2. Standard Linux binaries
+    for candidate in ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']:
+        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    # 3. Fallback to imageio_ffmpeg
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+    return 'ffmpeg'
+
+FFMPEG_PATH = get_ffmpeg_binary()
 
 # Load environment variables from .env if present
 env_file = os.path.join(os.path.dirname(__file__), '.env')
@@ -2737,10 +2753,6 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 "concurrent_fragment_downloads": 1 if is_yt else 8,
                 "buffersize": 1024 * 128,
                 "merge_output_format": "mp4",
-                "postprocessor_args": {
-                    "Merger": ["-movflags", "+faststart"],
-                    "FFmpegVideoRemuxer": ["-movflags", "+faststart"],
-                },
                 "js_runtimes": {"node": {}, "deno": {}},
                 "extractor_args": {
                     "twitter": {"api": ["syndication"]},
@@ -2765,7 +2777,6 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
         if clip_range:
             start_sec, end_sec = clip_range
             ydl_opts["download_ranges"] = yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)])
-            ydl_opts["force_keyframes_at_cuts"] = True
 
         loop = asyncio.get_running_loop()
         try:
@@ -2784,6 +2795,27 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
                 except Exception as first_err:
                     err_str = str(first_err).lower()
                     logger.warning(f"Primary yt-dlp download failed on {url}: {first_err}")
+
+                    if "ffmpeg" in err_str and ("-11" in err_str or "sigsegv" in err_str or "exited with code" in err_str):
+                        logger.warning(f"FFmpeg crash detected ({first_err})! Retrying with safe single-stream format (no merger)...")
+                        safe_opts = dict(ydl_opts)
+                        safe_opts.pop("download_ranges", None)
+                        if not is_audio:
+                            safe_opts["format"] = "best[ext=mp4]/best"
+                            safe_opts.pop("merge_output_format", None)
+                        try:
+                            with yt_dlp.YoutubeDL(safe_opts) as ydl_safe:
+                                info = ydl_safe.extract_info(url, download=True)
+                                fname = ydl_safe.prepare_filename(info)
+                                if is_audio:
+                                    fname = os.path.splitext(fname)[0] + ".mp3"
+                                elif not fname.endswith(".mp4"):
+                                    base = os.path.splitext(fname)[0]
+                                    if os.path.exists(base + ".mp4"):
+                                        fname = base + ".mp4"
+                                return fname, info
+                        except Exception as safe_err:
+                            logger.warning(f"Safe single-stream retry failed: {safe_err}")
                     
                     if is_yt:
                         # Fallback 1: Web Embedded & Web Safari without cookies (bypasses cookie session challenge while keeping Full HD)
