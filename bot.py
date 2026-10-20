@@ -12,6 +12,7 @@ import subprocess
 import urllib.request
 import urllib.parse
 import html
+from concurrent.futures import ThreadPoolExecutor
 try:
     from curl_cffi import requests as curl_requests
 except Exception:
@@ -507,18 +508,28 @@ def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
                 [get_cancel_button(cache_id, "❌ Cancel")]
             ]
         else:
-            buttons = [
-                [
+            q_urls = cached.get("quality_urls", {})
+            has_4k = "4k" in q_urls
+            buttons = []
+            if has_4k:
+                buttons.append([
                     InlineKeyboardButton("🌟 4K Ultra HD", callback_data=f"vid4k:{cache_id}"),
                     InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
-                ],
-                [
+                ])
+                buttons.append([
                     InlineKeyboardButton("📱 720p HD", callback_data=f"vid720:{cache_id}"),
                     InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}"),
-                ],
-                [InlineKeyboardButton("✂️ Clip / Trim Video", callback_data=f"clip:{cache_id}")],
-                [get_cancel_button(cache_id, "❌ Cancel")]
-            ]
+                ])
+            else:
+                buttons.append([
+                    InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
+                    InlineKeyboardButton("📱 720p HD", callback_data=f"vid720:{cache_id}"),
+                ])
+                buttons.append([
+                    InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}"),
+                ])
+            buttons.append([InlineKeyboardButton("✂️ Clip / Trim Video", callback_data=f"clip:{cache_id}")])
+            buttons.append([get_cancel_button(cache_id, "❌ Cancel")])
     elif platform == 'pinterest':
         if not has_video:
             buttons = [
@@ -1188,91 +1199,306 @@ def download_direct_file(media_url: str, cache_id: str, progress_hook=None, ext=
     return None
 
 def fetch_pexels_media(url: str):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    is_photo = "/photo" in url.lower() or "images.pexels" in url.lower()
+
+    # Extract ID and default title from URL
+    m_slug = re.search(r'/(?:video|videos|photo|photos)/([a-zA-Z0-9_.-]+)-(\d+)', url)
+    if m_slug:
+        raw_slug = m_slug.group(1).replace("-", " ").strip()
+        default_title = raw_slug.title()
+        media_id = m_slug.group(2)
+    else:
+        m_id = re.search(r'/(?:video|videos|photo|photos|video-files)/.*?(\d+)', url)
+        if not m_id:
+            m_id = re.search(r'/(\d+)(?:/|\?|$)', url)
+        media_id = m_id.group(1) if m_id else None
+        default_title = f"Pexels {'Photo' if is_photo else 'Video'} #{media_id}" if media_id else "Pexels Media"
+
+    title = default_title
+    author = "Pexels Creator"
     html = ""
+
+    # Strategy 1: Check if PEXELS_API_KEY environment variable is provided
+    pexels_api_key = os.getenv("PEXELS_API_KEY")
+    if pexels_api_key and media_id:
+        try:
+            api_endpoint = (
+                f"https://api.pexels.com/v1/photos/{media_id}"
+                if is_photo
+                else f"https://api.pexels.com/videos/videos/{media_id}"
+            )
+            req = urllib.request.Request(api_endpoint, headers={
+                "Authorization": pexels_api_key,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            })
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read().decode())
+                if is_photo:
+                    src_dict = data.get("src", {})
+                    photo_url = src_dict.get("original") or src_dict.get("large2x") or src_dict.get("large")
+                    photographer = data.get("photographer") or author
+                    alt = data.get("alt")
+                    return {
+                        "title": alt[:80] if alt else title,
+                        "author": photographer,
+                        "is_photo": True,
+                        "media_url": photo_url,
+                        "has_video": False,
+                        "resolved_url": url,
+                        "ext": "jpg",
+                        "is_pexels": True,
+                    }
+                else:
+                    user_dict = data.get("user", {})
+                    author = user_dict.get("name") or author
+                    video_files = data.get("video_files", [])
+                    qualities = {}
+                    for vf in video_files:
+                        link = vf.get("link")
+                        if not link:
+                            continue
+                        w = vf.get("width", 0)
+                        h = vf.get("height", 0)
+                        if w >= 2560 or h >= 1440:
+                            qualities["4k"] = link
+                        elif w >= 1920 or h >= 1080:
+                            qualities["1080"] = link
+                        elif w >= 1280 or h >= 720:
+                            qualities["720"] = link
+                        else:
+                            qualities["sd"] = link
+                    best_vid = qualities.get("1080") or qualities.get("720") or qualities.get("4k") or (video_files[0].get("link") if video_files else None)
+                    if best_vid:
+                        return {
+                            "title": title,
+                            "author": author,
+                            "is_photo": False,
+                            "media_url": best_vid,
+                            "quality_urls": qualities,
+                            "has_video": True,
+                            "resolved_url": best_vid,
+                            "ext": "mp4",
+                            "is_pexels": True,
+                        }
+        except Exception as e:
+            logger.debug(f"Pexels official API request failed: {e}")
+
+    # Strategy 2: Web Scraping via curl_cffi with full browser headers & Next.js __NEXT_DATA__
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    }
     try:
         if curl_requests:
-            r = curl_requests.get(url, impersonate="chrome", headers=headers, timeout=15)
-            if r.status_code == 200:
+            r = curl_requests.get(url, impersonate="chrome120", headers=headers, timeout=8)
+            if r.status_code == 200 and "just a moment" not in r.text.lower() and len(r.text) > 10000:
                 html = r.text
         else:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                html = resp.read().decode('utf-8', errors='ignore')
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw_html = resp.read().decode('utf-8', errors='ignore')
+                if "just a moment" not in raw_html.lower() and len(raw_html) > 10000:
+                    html = raw_html
     except Exception as e:
-        logger.warning(f"Error fetching Pexels media page: {e}")
-        return None
+        logger.debug(f"Pexels HTML scrape error: {e}")
 
-    if not html:
-        return None
+    if html:
+        # Check __NEXT_DATA__ for rich structured metadata
+        m_next = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html)
+        if m_next:
+            try:
+                next_data = json.loads(m_next.group(1))
+                page_props = next_data.get("props", {}).get("pageProps", {})
+                medium = page_props.get("medium", {})
+                attrs = medium.get("attributes", {})
+                if attrs.get("title"):
+                    title = attrs["title"]
+                user_obj = attrs.get("user") or page_props.get("user", {})
+                if user_obj and isinstance(user_obj, dict):
+                    first = user_obj.get("first_name") or ""
+                    last = user_obj.get("last_name") or ""
+                    full = f"{first} {last}".strip() or user_obj.get("username")
+                    if full:
+                        author = full
 
-    is_photo = "/photo/" in url
-    title = None
-    author = "Pexels Creator"
-    og_title = re.search(r'property="og:title"\s+content="([^"]+)"', html) or re.search(r'<title>(.*?)</title>', html)
-    if og_title:
-        raw_title = og_title.group(1).replace(" · Free Stock Video", "").replace(" · Free Stock Photo", "").replace(" | Pexels", "").strip()
-        if " by " in raw_title:
-            parts = raw_title.split(" by ")
-            title = parts[0].strip()
-            rest = parts[1].split(" on ")
-            author = rest[0].strip()
+                if is_photo:
+                    image_obj = attrs.get("image", {})
+                    src_url = image_obj.get("download_link") or attrs.get("download_link")
+                    if src_url:
+                        return {
+                            "title": title,
+                            "author": author,
+                            "is_photo": True,
+                            "media_url": src_url,
+                            "has_video": False,
+                            "resolved_url": url,
+                            "ext": "jpg",
+                            "is_pexels": True,
+                        }
+                else:
+                    video_obj = attrs.get("video", {})
+                    src_url = video_obj.get("src")
+                    if src_url:
+                        qualities = {"1080": src_url}
+                        if media_id:
+                            qualities["720"] = f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1280_720_30fps.mp4"
+                            qualities["sd"] = f"https://videos.pexels.com/video-files/{media_id}/{media_id}-sd_640_360_30fps.mp4"
+                        return {
+                            "title": title,
+                            "author": author,
+                            "is_photo": False,
+                            "media_url": src_url,
+                            "quality_urls": qualities,
+                            "has_video": True,
+                            "resolved_url": src_url,
+                            "ext": "mp4",
+                            "is_pexels": True,
+                        }
+            except Exception as e:
+                logger.debug(f"Error parsing Pexels __NEXT_DATA__: {e}")
+
+        # Regex fallback on raw HTML
+        og_title = re.search(r'property="og:title"\s+content="([^"]+)"', html)
+        if og_title:
+            raw_title = og_title.group(1).replace(" · Free Stock Video", "").replace(" · Free Stock Photo", "").replace(" | Pexels", "").strip()
+            if " by " in raw_title:
+                parts = raw_title.split(" by ")
+                title = parts[0].strip()
+                rest = parts[1].split(" on ")
+                author = rest[0].strip()
+            else:
+                title = raw_title
+
+        if is_photo:
+            imgs = re.findall(r'https://images\.pexels\.com/photos/\d+/[^\s"\'<>]+\.jpeg[^\s"\'<>]*', html)
+            best_img = None
+            for img in imgs:
+                if "dl=" in img:
+                    best_img = img.replace("&amp;", "&")
+                    break
+            if not best_img and imgs:
+                best_img = imgs[0].replace("&amp;", "&")
+            if best_img:
+                return {
+                    "title": title or default_title,
+                    "author": author,
+                    "is_photo": True,
+                    "media_url": best_img,
+                    "has_video": False,
+                    "resolved_url": url,
+                    "ext": "jpg",
+                    "is_pexels": True,
+                }
         else:
-            title = raw_title
+            pat = rf'https://videos\.pexels\.com/video-files/{media_id}/[^\s"\'<>]+\.mp4' if media_id else r'https://videos\.pexels\.com/video-files/\d+/[^\s"\'<>]+\.mp4'
+            vids = list(set(re.findall(pat, html)))
+            if not vids:
+                vids = list(set(re.findall(r'https://videos\.pexels\.com/[^\s"\'<>]+\.mp4', html)))
+
+            if vids:
+                qualities = {}
+                for v in vids:
+                    clean_v = v.replace("&amp;", "&")
+                    if "3840_2160" in clean_v or "2560_1440" in clean_v or "uhd" in clean_v:
+                        qualities["4k"] = clean_v
+                    elif "1920_1080" in clean_v or "1080" in clean_v:
+                        qualities["1080"] = clean_v
+                    elif "1280_720" in clean_v or "720" in clean_v:
+                        qualities["720"] = clean_v
+                    else:
+                        qualities["sd"] = clean_v
+
+                best_vid = qualities.get("1080") or qualities.get("720") or qualities.get("4k") or vids[0].replace("&amp;", "&")
+                return {
+                    "title": title or default_title,
+                    "author": author,
+                    "is_photo": False,
+                    "media_url": best_vid,
+                    "quality_urls": qualities,
+                    "has_video": True,
+                    "resolved_url": best_vid or url,
+                    "ext": "mp4",
+                    "is_pexels": True,
+                }
+
+    # Strategy 3: Deterministic Zero-Block CDN Resolution (Guaranteed fallback when Cloudflare blocks HTML)
+    if not media_id:
+        return None
 
     if is_photo:
-        imgs = re.findall(r'https://images\.pexels\.com/photos/\d+/[^\s"\'<>]+\.jpeg[^\s"\'<>]*', html)
-        best_img = None
-        for img in imgs:
-            if "dl=" in img:
-                best_img = img.replace("&amp;", "&")
-                break
-        if not best_img and imgs:
-            best_img = imgs[0].replace("&amp;", "&")
-        if not best_img:
-            return None
+        direct_photo = f"https://images.pexels.com/photos/{media_id}/pexels-photo-{media_id}.jpeg?cs=srgb&dl=pexels-{media_id}.jpg&fm=jpg"
         return {
-            "title": title or "Pexels Photo",
-            "author": author or "Pexels Creator",
+            "title": title or default_title,
+            "author": author,
             "is_photo": True,
-            "media_url": best_img,
+            "media_url": direct_photo,
             "has_video": False,
-            "resolved_url": url,
+            "resolved_url": direct_photo,
             "ext": "jpg",
             "is_pexels": True,
         }
     else:
-        vid_id_m = re.search(r'pexels\.com/video/(?:[^/]+-)?(\d+)', url)
-        vid_id = vid_id_m.group(1) if vid_id_m else ""
-        pat = rf'https://videos\.pexels\.com/video-files/{vid_id}/[^\s"\'<>]+\.mp4' if vid_id else r'https://videos\.pexels\.com/video-files/\d+/[^\s"\'<>]+\.mp4'
-        vids = list(set(re.findall(pat, html)))
-        if not vids:
-            vids = list(set(re.findall(r'https://videos\.pexels\.com/[^\s"\'<>]+\.mp4', html)))
+        # Fast concurrent probe of standard Pexels CDN video endpoints
+        candidate_urls = [
+            ("1080", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1920_1080_30fps.mp4"),
+            ("1080", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1920_1080_25fps.mp4"),
+            ("1080", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1920_1080_24fps.mp4"),
+            ("720", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1280_720_30fps.mp4"),
+            ("720", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1280_720_25fps.mp4"),
+            ("720", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1280_720_24fps.mp4"),
+            ("4k", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-uhd_3840_2160_30fps.mp4"),
+            ("4k", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-uhd_3840_2160_25fps.mp4"),
+            ("sd", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-sd_960_540_30fps.mp4"),
+            ("sd", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-sd_640_360_30fps.mp4"),
+            ("sd", f"https://videos.pexels.com/video-files/{media_id}/{media_id}-sd_640_360_25fps.mp4"),
+        ]
 
-        qualities = {}
-        for v in vids:
-            clean_v = v.replace("&amp;", "&")
-            if "3840_2160" in clean_v or "2560_1440" in clean_v or "uhd" in clean_v:
-                qualities["4k"] = clean_v
-            elif "1920_1080" in clean_v or "1080" in clean_v:
-                qualities["1080"] = clean_v
-            elif "1280_720" in clean_v or "720" in clean_v:
-                qualities["720"] = clean_v
-            else:
-                qualities["sd"] = clean_v
-
-        best_vid = qualities.get("1080") or qualities.get("720") or qualities.get("4k") or (vids[0].replace("&amp;", "&") if vids else None)
-        if not best_vid:
+        def _probe_url(item):
+            q, u = item
+            try:
+                if curl_requests:
+                    resp = curl_requests.head(u, impersonate="chrome120", timeout=2.5)
+                    status = resp.status_code
+                else:
+                    req_h = urllib.request.Request(u, method="HEAD")
+                    with urllib.request.urlopen(req_h, timeout=2.5) as resp:
+                        status = resp.status
+                if status == 200:
+                    return q, u
+            except Exception:
+                pass
             return None
 
+        qualities = {}
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            probed_results = [res for res in ex.map(_probe_url, candidate_urls) if res]
+
+        for q, u in probed_results:
+            if q not in qualities:
+                qualities[q] = u
+
+        if not qualities:
+            qualities["1080"] = f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1920_1080_30fps.mp4"
+            qualities["720"] = f"https://videos.pexels.com/video-files/{media_id}/{media_id}-hd_1280_720_30fps.mp4"
+
+        best_vid = qualities.get("1080") or qualities.get("720") or qualities.get("4k") or next(iter(qualities.values()))
         return {
-            "title": title or "Pexels Video",
-            "author": author or "Pexels Creator",
+            "title": title or default_title,
+            "author": author,
             "is_photo": False,
             "media_url": best_vid,
             "quality_urls": qualities,
             "has_video": True,
-            "resolved_url": best_vid or url,
+            "resolved_url": best_vid,
             "ext": "mp4",
             "is_pexels": True,
         }
