@@ -314,7 +314,7 @@ def resolve_url(url: str) -> str:
     if "facebook.com" in url or "fb.com" in url or "fb.watch" in url:
         return url
     # Full pin, post, and thread links are already direct — skip redirect resolution
-    if any(k in url for k in ["pinterest.com/pin/", "linkedin.com/posts/", "linkedin.com/feed/", "linkedin.com/video/", "threads.net/", "threads.com/"]):
+    if any(k in url for k in ["pinterest.com/pin/", "linkedin.com/posts/", "linkedin.com/feed/", "linkedin.com/video/", "threads.net/", "threads.com/", "pexels.com/", "motionarray.com/"]):
         return url
     try:
         # For short-links like pin.it, lnkd.in, use curl_cffi with Chrome TLS impersonation
@@ -372,6 +372,14 @@ def is_linkedin_url(url: str) -> bool:
 def is_threads_url(url: str) -> bool:
     u = url.lower()
     return 'threads.net' in u or 'threads.com' in u
+
+def is_pexels_url(url: str) -> bool:
+    u = url.lower()
+    return 'pexels.com' in u
+
+def is_motionarray_url(url: str) -> bool:
+    u = url.lower()
+    return 'motionarray.com' in u
 
 def format_progress_bar(percent, length=12):
     percent = max(0.0, min(100.0, percent))
@@ -431,9 +439,12 @@ async def cancel_task_and_cleanup(cache_id, message=None):
 
     if message:
         try:
-            await message.edit_text("❌ **Operation cancelled.** Cleaned up all temporary files.", parse_mode="Markdown")
+            await message.delete()
         except Exception:
-            pass
+            try:
+                await message.edit_text("🛑 **Operation cancelled.**", parse_mode="Markdown")
+            except Exception:
+                pass
 
 def get_support_button():
     return InlineKeyboardButton("💖 Help Keep Boltrip Free", callback_data="show_support")
@@ -458,6 +469,10 @@ def get_platform_info(url: str) -> str:
         return 'linkedin'
     elif 'threads.net' in u or 'threads.com' in u:
         return 'threads'
+    elif 'pexels.com' in u:
+        return 'pexels'
+    elif 'motionarray.com' in u:
+        return 'motionarray'
     return 'general'
 
 def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
@@ -489,6 +504,43 @@ def get_quality_keyboard(cache_id: str, platform: str) -> InlineKeyboardMarkup:
             buttons = [
                 [InlineKeyboardButton("🎬 Download Threads Post (HD)", callback_data=f"vidbest:{cache_id}")],
                 [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+    elif platform == 'pexels':
+        if not has_video:
+            buttons = [
+                [InlineKeyboardButton("🖼️ Download Pexels Photo (Original HD)", callback_data=f"vidbest:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+        else:
+            buttons = [
+                [
+                    InlineKeyboardButton("🌟 4K Ultra HD", callback_data=f"vid4k:{cache_id}"),
+                    InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
+                ],
+                [
+                    InlineKeyboardButton("📱 720p HD", callback_data=f"vid720:{cache_id}"),
+                    InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}"),
+                ],
+                [InlineKeyboardButton("✂️ Clip / Trim Video", callback_data=f"clip:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+    elif platform == 'motionarray':
+        if not has_video:
+            buttons = [
+                [InlineKeyboardButton("🎵 Download Audio / Music (MP3)", callback_data=f"aud:{cache_id}")],
+                [get_cancel_button(cache_id, "❌ Cancel")]
+            ]
+        else:
+            buttons = [
+                [
+                    InlineKeyboardButton("🎬 1080p Full HD", callback_data=f"vid1080:{cache_id}"),
+                    InlineKeyboardButton("📱 720p HD", callback_data=f"vid720:{cache_id}"),
+                ],
+                [
+                    InlineKeyboardButton("✂️ Clip / Trim Video", callback_data=f"clip:{cache_id}"),
+                    InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"aud:{cache_id}"),
+                ],
                 [get_cancel_button(cache_id, "❌ Cancel")]
             ]
     elif platform == 'pinterest':
@@ -1102,6 +1154,218 @@ def download_threads_direct(url, cache_id, progress_hook=None, direct_media_url=
         logger.warning(f"Threads direct download error: {e}")
     return None
 
+def download_direct_file(media_url: str, cache_id: str, progress_hook=None, ext="mp4", prefix="media"):
+    out_path = os.path.join(DOWNLOAD_DIR, f"dl_{cache_id}_{prefix}.{ext}")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        if curl_requests:
+            resp = curl_requests.get(media_url, impersonate="chrome", headers=headers, stream=True, timeout=30)
+            if resp.status_code != 200:
+                return None
+            total = int(resp.headers.get("content-length", 0))
+            downloaded = 0
+            start_time = time.time()
+            with open(out_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_hook:
+                        elapsed = max(time.time() - start_time, 0.1)
+                        speed = downloaded / elapsed
+                        progress_hook({
+                            "status": "downloading",
+                            "downloaded_bytes": downloaded,
+                            "total_bytes": total,
+                            "speed": speed,
+                            "eta": int((total - downloaded) / speed) if speed > 0 and total > downloaded else 0
+                        })
+        else:
+            req = urllib.request.Request(media_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as r, open(out_path, "wb") as f:
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                chunk_size = 64 * 1024
+                start_time = time.time()
+                while True:
+                    chunk = r.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_hook:
+                        elapsed = max(time.time() - start_time, 0.1)
+                        speed = downloaded / elapsed
+                        progress_hook({
+                            "status": "downloading",
+                            "downloaded_bytes": downloaded,
+                            "total_bytes": total,
+                            "speed": speed,
+                            "eta": int((total - downloaded) / speed) if speed > 0 and total > downloaded else 0
+                        })
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as e:
+        logger.warning(f"Direct stream download error: {e}")
+    return None
+
+def fetch_pexels_media(url: str):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    html = ""
+    try:
+        if curl_requests:
+            r = curl_requests.get(url, impersonate="chrome", headers=headers, timeout=15)
+            if r.status_code == 200:
+                html = r.text
+        else:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.warning(f"Error fetching Pexels media page: {e}")
+        return None
+
+    if not html:
+        return None
+
+    is_photo = "/photo/" in url
+    title = None
+    author = "Pexels Creator"
+    og_title = re.search(r'property="og:title"\s+content="([^"]+)"', html) or re.search(r'<title>(.*?)</title>', html)
+    if og_title:
+        raw_title = og_title.group(1).replace(" · Free Stock Video", "").replace(" · Free Stock Photo", "").replace(" | Pexels", "").strip()
+        if " by " in raw_title:
+            parts = raw_title.split(" by ")
+            title = parts[0].strip()
+            rest = parts[1].split(" on ")
+            author = rest[0].strip()
+        else:
+            title = raw_title
+
+    if is_photo:
+        imgs = re.findall(r'https://images\.pexels\.com/photos/\d+/[^\s"\'<>]+\.jpeg[^\s"\'<>]*', html)
+        best_img = None
+        for img in imgs:
+            if "dl=" in img:
+                best_img = img.replace("&amp;", "&")
+                break
+        if not best_img and imgs:
+            best_img = imgs[0].replace("&amp;", "&")
+        if not best_img:
+            return None
+        return {
+            "title": title or "Pexels Photo",
+            "author": author or "Pexels Creator",
+            "is_photo": True,
+            "media_url": best_img,
+            "has_video": False,
+            "resolved_url": url,
+            "ext": "jpg",
+            "is_pexels": True,
+        }
+    else:
+        vid_id_m = re.search(r'pexels\.com/video/(?:[^/]+-)?(\d+)', url)
+        vid_id = vid_id_m.group(1) if vid_id_m else ""
+        pat = rf'https://videos\.pexels\.com/video-files/{vid_id}/[^\s"\'<>]+\.mp4' if vid_id else r'https://videos\.pexels\.com/video-files/\d+/[^\s"\'<>]+\.mp4'
+        vids = list(set(re.findall(pat, html)))
+        if not vids:
+            vids = list(set(re.findall(r'https://videos\.pexels\.com/[^\s"\'<>]+\.mp4', html)))
+
+        qualities = {}
+        for v in vids:
+            clean_v = v.replace("&amp;", "&")
+            if "3840_2160" in clean_v or "2560_1440" in clean_v or "uhd" in clean_v:
+                qualities["4k"] = clean_v
+            elif "1920_1080" in clean_v or "1080" in clean_v:
+                qualities["1080"] = clean_v
+            elif "1280_720" in clean_v or "720" in clean_v:
+                qualities["720"] = clean_v
+            else:
+                qualities["sd"] = clean_v
+
+        best_vid = qualities.get("1080") or qualities.get("720") or qualities.get("4k") or (vids[0].replace("&amp;", "&") if vids else None)
+        if not best_vid:
+            return None
+
+        return {
+            "title": title or "Pexels Video",
+            "author": author or "Pexels Creator",
+            "is_photo": False,
+            "media_url": best_vid,
+            "quality_urls": qualities,
+            "has_video": True,
+            "resolved_url": best_vid or url,
+            "ext": "mp4",
+            "is_pexels": True,
+        }
+
+def download_pexels_direct(media_url, cache_id, progress_hook=None, ext="mp4"):
+    return download_direct_file(media_url, cache_id, progress_hook=progress_hook, ext=ext, prefix="pexels")
+
+def fetch_motionarray_media(url: str):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    html = ""
+    try:
+        if curl_requests:
+            r = curl_requests.get(url, impersonate="chrome", headers=headers, timeout=15)
+            if r.status_code == 200:
+                html = r.text
+        else:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.warning(f"Error fetching Motion Array media page: {e}")
+        return None
+
+    if not html:
+        return None
+
+    title = None
+    author = "Motion Array Creator"
+    t_m = re.search(r'<title>(.*?)</title>', html)
+    if t_m:
+        raw_t = t_m.group(1).replace(" | Motion Array", "").strip()
+        if " by " in raw_t and " - " in raw_t:
+            parts = raw_t.split(" by ")
+            title = parts[0].strip()
+            rest = parts[1].split(" - ")
+            author = rest[0].strip()
+        else:
+            title = raw_t
+
+    unquoted_html = html.replace('\\u002F', '/').replace('\\/', '/')
+    m3u8_m = re.search(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', unquoted_html)
+    mp4_m = re.search(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', unquoted_html)
+    mp3_m = re.search(r'https?://[^\s"\'<>]+\.mp3[^\s"\'<>]*', unquoted_html)
+
+    media_url = None
+    is_audio = False
+    if m3u8_m:
+        media_url = m3u8_m.group(0).replace("&amp;", "&")
+    elif mp4_m and "404.mp4" not in mp4_m.group(0):
+        media_url = mp4_m.group(0).replace("&amp;", "&")
+    elif mp3_m:
+        media_url = mp3_m.group(0).replace("&amp;", "&")
+        is_audio = True
+
+    if not media_url:
+        return None
+
+    return {
+        "title": title or "Motion Array Media",
+        "author": author,
+        "is_photo": False,
+        "media_url": media_url,
+        "has_video": not is_audio,
+        "resolved_url": media_url,
+        "original_url": url,
+        "ext": "mp3" if is_audio else "mp4",
+        "is_motionarray": True,
+    }
+
 
 
 def render_expired_page():
@@ -1626,14 +1890,17 @@ async def notify_telegram_downloaded(cache_id: str):
             "⚡ <i>Thanks for using @Boltrip_bot!</i>"
         )
 
-        await GLOBAL_BOT.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text=text,
-            reply_markup=get_post_download_keyboard(),
-            parse_mode="HTML"
-        )
-        logger.info(f"📲 [PHONE DOWNLOAD NOTIFIED] Successfully updated message for {cache_id} in chat {chat_id}")
+        try:
+            await GLOBAL_BOT.delete_message(chat_id=chat_id, message_id=status_msg_id)
+            logger.info(f"📲 [PHONE DOWNLOAD NOTIFIED] Successfully cleared download prompt for {cache_id} in chat {chat_id}")
+        except Exception:
+            await GLOBAL_BOT.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=text,
+                reply_markup=get_post_download_keyboard(),
+                parse_mode="HTML"
+            )
     except Exception as e:
         logger.warning(f"Could not notify Telegram of phone download: {e}")
 
@@ -1750,8 +2017,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Instagram (Reels & Posts)\n"
         "• Threads (Videos & Photos)\n"
         "• X / Twitter\n"
-        "• Pinterest\n"
-        "• Facebook & Reddit\n\n"
+        "• Pinterest (Pins & Idea Pins)\n"
+        "• Facebook & Reddit\n"
+        "• Pexels (Stock Videos & Photos in 4K/HD)\n"
+        "• Motion Array (Stock Footage, Motion Graphics & Audio)\n\n"
         "**Developer Contact:**\n"
         "• Contact [@silas_inegbe](https://t.me/silas_inegbe) for inquiries, feedback, or support.\n\n"
         "**How to Use:**\n"
@@ -1783,7 +2052,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/support` or `/donate` ➔ Help us keep servers free & ad-free\n"
         "• `/cancel` ➔ Abort ongoing download or upload\n\n"
         "**Features:**\n"
-        "• ✂️ Video section trimming (YouTube, Twitter, Facebook, etc.)\n"
+        "• ✂️ Video section trimming (YouTube, Twitter, Facebook, Pexels, Motion Array, etc.)\n"
         "• ❌ 1-Tap Cancel on every step\n"
         "• 📊 Real-time progress bars & download speed\n"
         "• 📱 Direct phone browser download for large files (>50 MB)\n"
@@ -1795,7 +2064,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     if user_id and user_id in WAITING_FOR_CLIP:
-        WAITING_FOR_CLIP.pop(user_id, None)
+        clip_info = WAITING_FOR_CLIP.pop(user_id, None)
+        prev_msg_id = clip_info.get("status_msg_id") if clip_info else None
+        if prev_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=prev_msg_id)
+            except Exception:
+                pass
     count = len(ACTIVE_TASKS)
     for cid in list(ACTIVE_TASKS.keys()):
         await cancel_task_and_cleanup(cid)
@@ -1805,7 +2080,16 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     ACTIVE_SUBPROCESSES.clear()
-    await update.message.reply_text(f"🛑 Cancelled all active operations ({count} stopped).", parse_mode="Markdown")
+    msg = await update.message.reply_text(f"🛑 Cancelled all active operations ({count} stopped).", parse_mode="Markdown")
+
+    async def _clean_cancel():
+        await asyncio.sleep(2.5)
+        try:
+            await msg.delete()
+            await update.message.delete()
+        except Exception:
+            pass
+    asyncio.create_task(_clean_cancel())
 
 async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
@@ -1819,7 +2103,8 @@ async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• **YouTube** (e.g. 1–3+ hour podcasts, live streams, tutorials)\n"
             "• **Twitch & Kick**\n"
             "• **X / Twitter**\n"
-            "• **Facebook & Reddit**\n\n"
+            "• **Facebook & Reddit**\n"
+            "• **Pexels & Motion Array**\n\n"
             "❌ **Not supported for section streaming:**\n"
             "• **TikTok, Instagram Reels, Threads, Pinterest**\n"
             "*(Micro-videos [<60s] do not support selective streaming)*\n\n"
@@ -1846,7 +2131,7 @@ async def clip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⚠️ **Clipping is not supported on {platform.title()}**\n\n"
             f"TikTok, Instagram Reels, Threads, and Pinterest videos are already short mobile clips (<60s) and do not support section streaming.\n\n"
-            f"Clipping works on: **YouTube, Twitch, X/Twitter, Facebook, and Reddit**.",
+            f"Clipping works on: **YouTube, Twitch, X/Twitter, Facebook, Reddit, Pexels, and Motion Array**.",
             parse_mode="Markdown"
         )
         return
@@ -2056,6 +2341,20 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             else:
                 raise Exception("Threads: No downloadable video, photo, or media attachment found on this post.")
 
+        if is_pexels_url(u):
+            pex_meta = fetch_pexels_media(u)
+            if pex_meta:
+                return pex_meta
+            else:
+                raise Exception("Pexels: No downloadable stock video or photo found on this page.")
+
+        if is_motionarray_url(u):
+            ma_meta = fetch_motionarray_media(u)
+            if ma_meta:
+                return ma_meta
+            else:
+                raise Exception("Motion Array: No downloadable stock video or audio found on this page.")
+
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -2106,6 +2405,20 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                 "• Or the post might be restricted, private, or deleted."
             )
             await status_msg.edit_text(friendly_err, parse_mode="Markdown")
+        elif "pexels" in err_text.lower():
+            friendly_err = (
+                "⚠️ **No downloadable media found on this Pexels post.**\n\n"
+                "• Please verify that the link points to a valid Pexels stock video or photo.\n"
+                "• Example: `https://www.pexels.com/video/a-waterfall-in-a-forest-856193/`"
+            )
+            await status_msg.edit_text(friendly_err, parse_mode="Markdown")
+        elif "motion array" in err_text.lower() or "motionarray" in err_text.lower():
+            friendly_err = (
+                "⚠️ **No downloadable media found on this Motion Array post.**\n\n"
+                "• Please verify that the link points to a valid Motion Array video, motion graphic, or audio track.\n"
+                "• Example: `https://motionarray.com/stock-video/flying-above-the-clouds-1680453/`"
+            )
+            await status_msg.edit_text(friendly_err, parse_mode="Markdown")
         else:
             await status_msg.edit_text(f"❌ **Failed to load link:**\n`{err_text[:200]}`", parse_mode="Markdown")
         return
@@ -2114,7 +2427,9 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     title = meta.get("title", "Media")
     author = meta.get("author", "Creator")
     logger.info(f"🔍 [METADATA] Extracted: '{title[:45]}' | Creator: '{author}' (target_url: {target_url})")
-    platform = get_platform_info(target_url)
+    platform = get_platform_info(url)
+    if platform == "general" and target_url != url:
+        platform = get_platform_info(target_url)
     MEDIA_CACHE[cache_id] = {
         "url": target_url,
         "title": title,
@@ -2122,6 +2437,10 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         "platform": platform,
         "is_pinterest": meta.get("is_pinterest", False),
         "is_threads": meta.get("is_threads", False),
+        "is_pexels": meta.get("is_pexels", False),
+        "is_motionarray": meta.get("is_motionarray", False),
+        "is_photo": meta.get("is_photo", False),
+        "quality_urls": meta.get("quality_urls", {}),
         "media_url": meta.get("media_url"),
         "ext": meta.get("ext", "mp4"),
         "has_video": meta.get("has_video", True),
@@ -2173,6 +2492,19 @@ async def handle_incoming_link(update: Update, context: ContextTypes.DEFAULT_TYP
 
                 clip_state = WAITING_FOR_CLIP.pop(user_id, None)
                 cache_id = clip_state["cache_id"]
+
+                # Clean up previous disclaimer/prompt and raw user text
+                prev_msg_id = clip_state.get("status_msg_id")
+                if prev_msg_id:
+                    try:
+                        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=prev_msg_id)
+                    except Exception:
+                        pass
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
+
                 cached = MEDIA_CACHE.get(cache_id)
                 if not cached:
                     await update.message.reply_text("⚠️ Download session expired. Please paste the link again.")
@@ -2246,7 +2578,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "cancel_clip":
         user_id = query.from_user.id
         WAITING_FOR_CLIP.pop(user_id, None)
-        await query.edit_message_text("❌ Clipping cancelled.")
+        try:
+            await query.message.delete()
+        except Exception:
+            try:
+                await query.edit_message_text("❌ Clipping cancelled.")
+            except Exception:
+                pass
         return
 
     if action == "back_formats":
@@ -2290,7 +2628,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✂️ **Clip / Trim Video Section**\n"
             f"`{title[:50]}`\n\n"
             f"⚠️ **Supported Platforms Disclaimer:**\n"
-            f"• **Supported:** YouTube, Twitch, X / Twitter, Facebook, Reddit\n"
+            f"• **Supported:** YouTube, Twitch, X / Twitter, Facebook, Reddit, Pexels, Motion Array\n"
             f"• **Not Supported:** TikTok, Instagram, Threads, Pinterest _(micro-videos do not support selective section streaming)_\n\n"
             f"⏱️ **How to Clip:**\n"
             f"Reply with the **start** and **end** timestamp of the part you want to download:\n\n"
@@ -2511,7 +2849,10 @@ async def download_and_send(update, context, status_msg, cache_id, quality="1080
             try:
                 await status_msg.delete()
             except Exception:
-                pass
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+                except Exception:
+                    pass
             ACTIVE_TASKS.pop(cache_id, None)
             return
         except Exception as e:
@@ -2628,6 +2969,8 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
     is_fb = is_facebook_url(url)
     is_pin = is_pinterest_url(url)
     is_threads = is_threads_url(url)
+    is_pexels = is_pexels_url(url)
+    is_motionarray = is_motionarray_url(url)
     downloaded_path = None
 
     if is_tiktok and not is_audio:
@@ -2703,6 +3046,64 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
         except Exception as e:
             logger.warning(f"Threads direct download failed, falling back to yt-dlp: {e}")
             downloaded_path = None
+
+    if is_pexels and not downloaded_path:
+        try:
+            cached_info = MEDIA_CACHE.get(cache_id, {})
+            is_photo = cached_info.get("is_photo", False)
+            quality_urls = cached_info.get("quality_urls", {})
+            direct_media_url = None
+            if is_photo:
+                direct_media_url = cached_info.get("media_url")
+                cached_ext = cached_info.get("ext", "jpg")
+            else:
+                cached_ext = "mp4"
+                if quality == "4k" and "4k" in quality_urls:
+                    direct_media_url = quality_urls["4k"]
+                elif quality == "1080" and "1080" in quality_urls:
+                    direct_media_url = quality_urls["1080"]
+                elif quality == "720" and "720" in quality_urls:
+                    direct_media_url = quality_urls["720"]
+                elif "1080" in quality_urls:
+                    direct_media_url = quality_urls["1080"]
+                elif "720" in quality_urls:
+                    direct_media_url = quality_urls["720"]
+                else:
+                    direct_media_url = cached_info.get("media_url")
+
+            if direct_media_url:
+                loop = asyncio.get_running_loop()
+                downloaded_path = await loop.run_in_executor(
+                    None, lambda: download_pexels_direct(direct_media_url, cache_id, progress_hook, ext=cached_ext)
+                )
+                if downloaded_path and is_audio and downloaded_path.endswith(".mp4"):
+                    mp3_path = os.path.splitext(downloaded_path)[0] + ".mp3"
+                    if FFMPEG_PATH:
+                        cmd = [FFMPEG_PATH, "-y", "-i", downloaded_path, "-vn", "-c:a", "libmp3lame", "-q:a", "2", mp3_path]
+                        await loop.run_in_executor(None, lambda: subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True))
+                        try:
+                            os.remove(downloaded_path)
+                        except Exception:
+                            pass
+                        downloaded_path = mp3_path
+        except Exception as e:
+            logger.warning(f"Pexels direct download failed: {e}")
+            downloaded_path = None
+
+    if is_motionarray and not downloaded_path:
+        cached_info = MEDIA_CACHE.get(cache_id, {})
+        has_video = cached_info.get("has_video", True)
+        cached_media_url = cached_info.get("media_url")
+        cached_ext = cached_info.get("ext", "mp4")
+        if (not has_video or cached_ext == "mp3") and cached_media_url:
+            try:
+                loop = asyncio.get_running_loop()
+                downloaded_path = await loop.run_in_executor(
+                    None, lambda: download_direct_file(cached_media_url, cache_id, progress_hook, ext="mp3", prefix="ma_audio")
+                )
+            except Exception as e:
+                logger.warning(f"Motion Array direct audio download failed: {e}")
+                downloaded_path = None
 
     if not downloaded_path:
         outtmpl = os.path.join(DOWNLOAD_DIR, f"dl_{cache_id}_%(id)s.%(ext)s")
@@ -2966,6 +3367,34 @@ async def _run_download_workflow(update, context, status_msg, cache_id, quality,
         await status_msg.edit_text("❌ Download could not locate completed file.", parse_mode="Markdown")
         return
 
+    # Universal trim for all download sources if clip_range was requested
+    if clip_range and downloaded_path and os.path.exists(downloaded_path) and FFMPEG_PATH:
+        start_sec, end_sec = clip_range
+        target_dur = end_sec - start_sec
+        meta = probe_video_metadata(downloaded_path)
+        actual_dur = meta.get("duration", 0)
+        if actual_dur > target_dur + 1.5 or start_sec > 0.5:
+            logger.info(f"Trimming with FFmpeg: start={start_sec}s target={target_dur}s actual={actual_dur}s")
+            ext = os.path.splitext(downloaded_path)[1] or (".mp3" if is_audio else ".mp4")
+            trimmed_path = os.path.join(DOWNLOAD_DIR, f"trimmed_{cache_id}_{int(start_sec)}_{int(end_sec)}{ext}")
+            def do_universal_trim():
+                trim_cmd = [
+                    FFMPEG_PATH, "-y",
+                    "-ss", str(start_sec),
+                    "-i", downloaded_path,
+                    "-t", str(target_dur),
+                    "-c", "copy",
+                    trimmed_path
+                ]
+                return subprocess.run(trim_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            trim_res = await loop.run_in_executor(None, do_universal_trim)
+            if trim_res.returncode == 0 and os.path.exists(trimmed_path) and os.path.getsize(trimmed_path) > 0:
+                try:
+                    os.remove(downloaded_path)
+                except Exception:
+                    pass
+                downloaded_path = trimmed_path
+
     cached_item = MEDIA_CACHE.get(cache_id, {})
     cached_item["file_path"] = downloaded_path
     cached_item["is_tiktok"] = is_tiktok
@@ -3157,7 +3586,10 @@ async def upload_to_telegram(update, context, status_msg, cache_id, file_path, i
         try:
             await status_msg.delete()
         except Exception:
-            pass
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except Exception:
+                pass
 
     except asyncio.CancelledError:
         cleanup_files(cache_id)
